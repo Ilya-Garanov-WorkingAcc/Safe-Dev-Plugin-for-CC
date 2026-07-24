@@ -18,10 +18,23 @@
 import sys
 import json
 
+# Если в сообщениях ниже есть не-ASCII (кириллица, эмодзи) — на Windows-консоли
+# с не-UTF8 кодировкой по умолчанию (cp1251/cp1252/cp437) sys.stdout.write()
+# падает с UnicodeEncodeError, а fail-open в конце файла тихо проглатывает
+# исключение: JSON-решение хука теряется целиком. Форсируем UTF-8 заранее.
+for _stream in (sys.stdin, sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 
 def emit(obj):
-    """Отдать stdout-JSON и выйти 0."""
-    sys.stdout.write(json.dumps(obj, ensure_ascii=False))
+    """Отдать stdout-JSON и выйти 0.
+    ensure_ascii=True — вторая, независимая линия защиты от кодировки консоли:
+    JSON-текст состоит только из ASCII (\\uXXXX-escape для не-ASCII), Claude
+    Code корректно разэкранирует его при разборе."""
+    sys.stdout.write(json.dumps(obj, ensure_ascii=True))
     sys.exit(0)
 
 

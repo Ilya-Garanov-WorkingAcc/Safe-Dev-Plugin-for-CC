@@ -26,6 +26,17 @@ import re
 import json
 import subprocess
 
+# См. secret_redactor.py: на консолях с не-UTF8 кодировкой по умолчанию
+# (cp1251/cp1252/cp437 и т.п. — типично для Windows) stdout кодирует строго
+# (errors="strict") и падает с UnicodeEncodeError на кириллице/эмодзи в наших
+# сообщениях, а fail-open в main() тихо проглатывает исключение — JSON-решение
+# и даже сам факт «батарея не найдена»/«тесты пройдены» пропадают без следа.
+for _stream in (sys.stdin, sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 WRITE_TOOLS = {"Write", "Edit", "MultiEdit"}
 # ext -> команда запуска
 RUNNERS = {
@@ -65,7 +76,10 @@ def run_battery(test_path):
     ext = os.path.splitext(test_path)[1]
     cmd = RUNNERS.get(ext, ["python3"]) + [test_path]
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT_S)
+        # encoding= (не text=True) фиксирует UTF-8 для декодирования вывода
+        # батареи независимо от локали процесса/консоли.
+        p = subprocess.run(cmd, capture_output=True, encoding="utf-8",
+                            errors="replace", timeout=TIMEOUT_S)
     except subprocess.TimeoutExpired:
         return False, "TIMEOUT после {}s: {}".format(TIMEOUT_S, test_path)
     except Exception as e:                       # интерпретатор не найден и т.п.
@@ -75,7 +89,8 @@ def run_battery(test_path):
 
 
 def emit_stdout(obj):
-    sys.stdout.write(json.dumps(obj, ensure_ascii=False))
+    # ensure_ascii=True: вторая, независимая линия защиты — см. secret_redactor.py.
+    sys.stdout.write(json.dumps(obj, ensure_ascii=True))
 
 
 def main():

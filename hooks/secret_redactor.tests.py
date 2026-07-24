@@ -87,5 +87,34 @@ p = subprocess.run(["python3", HOOK], input="", capture_output=True, text=True);
 p = subprocess.run(["python3", HOOK], input="{bad", capture_output=True, text=True);     check("malformed rc0", p.returncode==0)
 _,rc = run_event({"hook_event_name":"SessionStart","tool_name":"x"});                     check("unknown event rc0", rc==0)
 
+# PART E — non-UTF8 console encoding (regression: emoji/Cyrillic in messages
+# used to crash sys.stdout.write() under a non-UTF8 default encoding, e.g. a
+# Windows console on cp1251/cp1252/cp437; fail-open then swallowed the crash
+# and the redaction JSON silently never reached Claude Code).
+print("=== PART E: non-UTF8 console encoding (Windows cp1251/cp1252/cp437) ===")
+def run_event_env(payload, env_overrides):
+    env = dict(os.environ); env.update(env_overrides)
+    p = subprocess.run(["python3", HOOK], input=json.dumps(payload),
+                       capture_output=True, text=True, env=env)
+    out = p.stdout.strip()
+    try: return (json.loads(out) if out else {}), p.returncode
+    except json.JSONDecodeError: return {"__raw__": out}, p.returncode
+
+for cp in ("cp1251", "cp1252", "cp437"):
+    res, rc = run_event_env(
+        {"hook_event_name":"PostToolUse","tool_name":"Bash","session_id":"t",
+         "tool_response":{"stdout":"AWS=AKIAIOSFODNN7EXAMPLE","stderr":""}},
+        {"PYTHONIOENCODING": cp})
+    upd = res.get("hookSpecificOutput", {}).get("updatedToolOutput")
+    ok = rc == 0 and isinstance(upd, dict) and has_ph(json.dumps(upd)) and "AKIA" not in json.dumps(upd)
+    check(f"PostToolUse redact survives {cp} stdout", ok, f"rc={rc} got={res!r}"[:80])
+
+    res, rc = run_event_env(
+        {"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"t",
+         "tool_input":{"command":"curl -H 'Authorization: Bearer " + "A"*30 + "' x"}},
+        {"PYTHONIOENCODING": cp})
+    ok = rc == 0 and res.get("hookSpecificOutput", {}).get("permissionDecision") == "ask"
+    check(f"PreToolUse ask survives {cp} stdout", ok, f"rc={rc} got={res!r}"[:80])
+
 print("\nSUMMARY:", "ALL PASSED" if not FAILS else f"FAILED({len(FAILS)}) {FAILS}")
 sys.exit(1 if FAILS else 0)

@@ -25,10 +25,14 @@ def check(name, ok, detail=""):
     if not ok:
         FAILS.append(name)
 
-def run_event(payload):
-    """Полный прогон хука через subprocess со stdin-JSON."""
+def run_event(payload, env_overrides=None):
+    """Полный прогон хука через subprocess со stdin-JSON.
+    env_overrides — для эмуляции не-UTF8 консоли (см. секцию 7 ниже)."""
+    env = None
+    if env_overrides:
+        env = dict(os.environ); env.update(env_overrides)
     p = subprocess.run(["python3", HOOK], input=json.dumps(payload),
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, env=env)
     out = p.stdout.strip()
     try:
         return (json.loads(out) if out else {}), p.returncode
@@ -59,6 +63,14 @@ def run_event(payload):
 p = subprocess.run(["python3", HOOK], input="",       capture_output=True, text=True); check("empty stdin -> rc0", p.returncode == 0)
 p = subprocess.run(["python3", HOOK], input="{bad",   capture_output=True, text=True); check("malformed json -> rc0", p.returncode == 0)
 _, rc = run_event({"hook_event_name": "SessionStart"});                                check("unknown event -> rc0", rc == 0)
+
+# --- 7. Кодировка консоли (если в сообщениях хука есть кириллица/эмодзи) ------
+# Эмулирует Windows-консоль с не-UTF8 кодировкой на Linux/macOS-машине
+# разработчика — без reconfigure(encoding="utf-8") хук падает с
+# UnicodeEncodeError, а fail-open молча теряет JSON-решение целиком.
+# for cp in ("cp1251", "cp1252", "cp437"):
+#     res, rc = run_event({...}, env_overrides={"PYTHONIOENCODING": cp})
+#     check(f"survives {cp}", rc == <ожидаемый>, f"rc={rc}")
 
 print("\nSUMMARY:", "ALL PASSED" if not FAILS else f"FAILED({len(FAILS)}) {FAILS}")
 sys.exit(1 if FAILS else 0)

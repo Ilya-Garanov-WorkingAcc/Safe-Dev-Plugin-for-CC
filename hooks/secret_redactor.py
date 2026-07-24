@@ -34,6 +34,21 @@ import re
 import json
 import datetime
 
+# На консолях с не-UTF8 кодировкой по умолчанию (cp1251/cp1252/cp437 и т.п. —
+# типично для Windows) Python выбирает эту кодировку для stdin/stdout/stderr
+# по локали процесса, даже когда поток на самом деле — pipe в Claude Code, а не
+# видимый терминал. Наши сообщения содержат кириллицу и эмодзи: stdout по
+# умолчанию кодирует строго (errors="strict") и падает с UnicodeEncodeError на
+# первом же непредставимом символе, а fail-open в main() тихо проглатывает
+# исключение — JSON-решение хука теряется целиком, и secret_redactor молча
+# перестаёт маскировать секреты именно на таких машинах. Форсируем UTF-8 на
+# всех трёх потоках до первой операции чтения/записи.
+for _stream in (sys.stdin, sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 AUDIT_LOG = os.path.expanduser(os.path.join("~", ".claude", "safe-development-audit.log"))
 
 # --- Классификация инструментов ---------------------------------------------
@@ -175,8 +190,13 @@ def audit(event, tool, action, findings, session_id, extra=""):
 
 
 def emit(obj):
-    """Отдать JSON-решение хука и выйти (код 0 => JSON парсится Claude Code)."""
-    sys.stdout.write(json.dumps(obj, ensure_ascii=False))
+    """Отдать JSON-решение хука и выйти (код 0 => JSON парсится Claude Code).
+    ensure_ascii=True — вторая, независимая линия защиты: даже если
+    reconfigure() выше по какой-то причине не сработал, сам JSON-текст состоит
+    только из ASCII-байт (\\uXXXX-escape для кириллицы/эмодзи) и кодируется
+    без ошибок в ЛЮБОЙ кодировке; Claude Code корректно разэкранирует их при
+    разборе JSON."""
+    sys.stdout.write(json.dumps(obj, ensure_ascii=True))
     sys.exit(0)
 
 
