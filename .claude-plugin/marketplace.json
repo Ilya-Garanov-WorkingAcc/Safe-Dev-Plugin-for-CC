@@ -10,7 +10,7 @@
       "name": "safe-development",
       "source": "./",
       "description": "Redacts secrets from tool output/egress and blocks hook edits that fail their test battery.",
-      "version": "1.0.0"
+      "version": "1.0.1"
     }
   ]
 }

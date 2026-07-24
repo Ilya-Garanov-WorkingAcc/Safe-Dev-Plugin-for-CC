@@ -1,13 +1,12 @@
 {
   "name": "safe-development",
   "displayName": "Safe_Development",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Redacts secrets (AWS/GitHub/Stripe/Slack/Google/JWT/PEM/etc.) from tool output and egress calls, and enforces a mandatory test battery after every hook edit. Includes the hook-development skill.",
   "author": {
     "name": "Ilya Garanov",
     "email": "garanov.ilya.working@gmail.com"
   },
   "license": "MIT",
-  "keywords": ["security", "secrets", "hooks", "testing", "redaction"],
-  "hooks": "./hooks/hooks.json"
+  "keywords": ["security", "secrets", "hooks", "testing", "redaction"]
 }
