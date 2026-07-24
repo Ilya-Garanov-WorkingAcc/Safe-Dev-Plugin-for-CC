@@ -1,0 +1,16 @@
+{
+  "name": "safe-development-marketplace",
+  "owner": {
+    "name": "Ilya Garanov",
+    "email": "garanov.ilya.working@gmail.com"
+  },
+  "description": "Marketplace for the Safe_Development plugin: secret redaction hook + mandatory hook test-battery enforcement + hook-development skill.",
+  "plugins": [
+    {
+      "name": "safe-development",
+      "source": "./",
+      "description": "Redacts secrets from tool output/egress and blocks hook edits that fail their test battery.",
+      "version": "1.0.0"
+    }
+  ]
+}
