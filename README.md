@@ -20,35 +20,30 @@ Each hook ships with its own test battery (`hooks/secret_redactor.tests.py`,
 
 ## Install on another account / another computer
 
-Requires Python 3 on PATH. Two ways to distribute it, pick one.
+Requires Python 3 on PATH. Published at:
+https://github.com/Ilya-Garanov-WorkingAcc/Safe-Dev-Plugin-for-CC
+(public repo — GitHub does not allow spaces in repo names, so "Safe Dev Plugin
+for CC" became the slug `Safe-Dev-Plugin-for-CC`; the plugin's own internal
+name, used in install commands below, stays `safe-development` regardless —
+that comes from `plugin.json`, not the repo name).
 
-### Option A — via your own GitHub repo (recommended for reuse across machines)
+### Option A — install from the published GitHub repo
 
-**On this machine, publish it once:**
-
-```bash
-cd safe-development
-git init
-git add .claude-plugin hooks skills README.md .gitignore
-git commit -m "Safe_Development plugin: secret redaction + hook test enforcement"
-git branch -M main
-git remote add origin https://github.com/<your-username>/safe-development.git
-git push -u origin main
-```
-
-(Create the empty `safe-development` repo on GitHub first, or use `gh repo
-create safe-development --public --source=. --push` instead of the three
-commands above.)
-
-**On the other account/computer, inside Claude Code:**
+On the other account/computer, inside Claude Code:
 
 ```
-/plugin marketplace add <your-username>/safe-development
+/plugin marketplace add Ilya-Garanov-WorkingAcc/Safe-Dev-Plugin-for-CC
 /plugin install safe-development@safe-development-marketplace
 ```
 
-Restart the Claude Code session (hooks load at session start) — or run
-`/reload-plugins` if available in your version.
+Restart the Claude Code session afterward (hooks load at session start) — or
+run `/reload-plugins` if available in your version.
+
+To update later, after pulling new commits into the repo:
+```
+/plugin marketplace update safe-development-marketplace
+/plugin update safe-development@safe-development-marketplace
+```
 
 ### Option B — copy the folder directly (no GitHub, no publishing)
 
