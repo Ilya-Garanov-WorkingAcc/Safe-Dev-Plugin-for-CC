@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "description": "Чувствительные пути (TS.md §12.1). Тонкий слой поверх декларативных permissions.deny: те закрывают инструмент Read, но не закрывают `cat ~/.ssh/id_rsa` через Bash. Отличие от secret_redactor: тот читает и маскирует по содержимому, path_guard не даёт прочитать вовсе — regex может не распознать нестандартный формат ключа, а путь известен заранее.",
+  "rules": [
+    {
+      "id": "path-ssh-key",
+      "class": "path-sensitive",
+      "severity": "HIGH",
+      "match": {
+        "kind": "path",
+        "path_glob": ["**/.ssh/**", "**/id_rsa*", "**/id_ed25519*",
+                      "**/id_ecdsa*", "**/id_dsa*", "**/authorized_keys"],
+        "path_glob_not": ["**/*.pub"],
+        "tools": ["Read", "Glob", "Grep", "Bash"],
+        "bash_readers": ["cat", "less", "more", "head", "tail", "strings", "xxd",
+                         "od", "hexdump", "base64", "cp", "scp", "rsync", "tar",
+                         "zip", "gzip", "curl", "nc", "vi", "vim", "nano", "awk",
+                         "sed", "grep"]
+      },
+      "message": "Приватные ключи SSH не читаются агентом.",
+      "remediation": "Для работы с удалёнными хостами используйте ssh-agent: ключ остаётся в агенте, а команде достаточно `ssh host`. Публичный ключ (*.pub) читать можно.",
+      "reference": "docs/RUNBOOK.md#path-sensitive"
+    },
+    {
+      "id": "path-cloud-credentials",
+      "class": "path-sensitive",
+      "severity": "HIGH",
+      "match": {
+        "kind": "path",
+        "path_glob": ["**/.aws/credentials", "**/.aws/config", "**/.kube/config",
+                      "**/.docker/config.json", "**/.config/gcloud/**",
+                      "**/.azure/**", "**/.terraformrc", "**/terraform.tfstate"],
+        "tools": ["Read", "Glob", "Grep", "Bash"],
+        "bash_readers": ["cat", "less", "more", "head", "tail", "strings", "base64",
+                         "cp", "scp", "rsync", "tar", "curl", "jq", "grep", "awk"]
+      },
+      "message": "Учётные данные облачных провайдеров не читаются агентом.",
+      "remediation": "Профиль подставляется окружением: AWS_PROFILE=dev aws s3 ls. Проверить активный контекст можно командой `aws sts get-caller-identity` или `kubectl config current-context`.",
+      "reference": "docs/RUNBOOK.md#path-sensitive"
+    },
+    {
+      "id": "path-private-key-file",
+      "class": "path-sensitive",
+      "severity": "HIGH",
+      "match": {
+        "kind": "path",
+        "path_glob": ["**/*.pem", "**/*.p12", "**/*.pfx", "**/*.jks",
+                      "**/*.keystore", "**/.gnupg/**"],
+        "tools": ["Read", "Glob", "Grep", "Bash"],
+        "bash_readers": ["cat", "less", "more", "head", "tail", "strings", "base64",
+                         "openssl", "cp", "scp", "rsync", "tar", "curl"]
+      },
+      "message": "Файл сертификата или приватного ключа не читается агентом.",
+      "remediation": "Для проверки сертификата достаточно метаданных: openssl x509 -in <файл> -noout -subject -dates — эта команда не выводит закрытую часть.",
+      "reference": "docs/RUNBOOK.md#path-sensitive"
+    },
+    {
+      "id": "path-netrc-pgpass",
+      "class": "path-sensitive",
+      "severity": "HIGH",
+      "match": {
+        "kind": "path",
+        "path_glob": ["**/.netrc", "**/_netrc", "**/.pgpass", "**/.my.cnf",
+                      "**/.pypirc", "**/.npmrc", "**/.git-credentials"],
+        "tools": ["Read", "Glob", "Grep", "Bash"],
+        "bash_readers": ["cat", "less", "more", "head", "tail", "strings", "grep",
+                         "awk", "sed", "cp", "curl"]
+      },
+      "message": "Файл с сохранёнными паролями к сервисам не читается агентом.",
+      "remediation": "Строку подключения без пароля можно собрать вручную; сам пароль клиент подставит из этого файла самостоятельно.",
+      "reference": "docs/RUNBOOK.md#path-sensitive"
+    },
+    {
+      "id": "path-claude-credentials",
+      "class": "path-sensitive",
+      "severity": "CRITICAL",
+      "match": {
+        "kind": "path",
+        "path_glob": ["**/.claude/.credentials.json", "**/.claude/statsig/**",
+                      "**/.config/claude/**"],
+        "tools": ["Read", "Glob", "Grep", "Bash"],
+        "bash_readers": ["cat", "less", "more", "head", "tail", "strings", "jq",
+                         "grep", "cp", "curl", "base64"]
+      },
+      "message": "Учётные данные самого Claude Code. Их чтение агентом означает возможность действовать от вашего имени вне этой сессии.",
+      "remediation": "Проверить состояние авторизации можно командой /status в интерфейсе Claude Code.",
+      "reference": "docs/RUNBOOK.md#path-sensitive"
+    },
+    {
+      "id": "path-dotenv-via-bash",
+      "class": "path-sensitive",
+      "severity": "MEDIUM",
+      "match": {
+        "kind": "path",
+        "path_glob": ["**/.env", "**/.env.*", "**/secrets/**", "**/*.secrets.*"],
+        "path_glob_not": ["**/.env.example", "**/.env.sample", "**/.env.template",
+                          "**/.env.dist"],
+        "tools": ["Bash"],
+        "bash_readers": ["cat", "less", "more", "head", "tail", "strings", "grep",
+                         "awk", "sed", "base64", "cp", "scp", "curl", "source"]
+      },
+      "message": "Чтение .env через Bash обходит декларативный запрет Read(**/.env) из рекомендуемых настроек.",
+      "remediation": "Имена переменных без значений: grep -o '^[A-Z_]*' .env. Значение конкретной переменной проверяйте через приложение, а не через вывод файла.",
+      "reference": "docs/RUNBOOK.md#path-sensitive"
+    }
+  ]
+}

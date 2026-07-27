@@ -1,12 +1,21 @@
 {
-  "name": "safe-development",
-  "displayName": "Safe_Development",
-  "version": "1.0.3",
-  "description": "Redacts secrets (AWS/GitHub/Stripe/Slack/Google/JWT/PEM/etc.) from tool output and egress calls, and enforces a mandatory test battery after every hook edit. Includes the hook-development skill.",
+  "name": "secure-dev",
+  "displayName": "secure-dev",
+  "version": "2.0.0",
+  "description": "Контроль безопасной разработки для Claude Code: целостность конфигурации клонированного репозитория, семантическая блокировка деструктивных команд, анонимизация секретов, детект косвенных prompt injection, JSONL-аудит и heartbeat. Преемник safe-development v1.x.",
   "author": {
     "name": "Ilya Garanov",
     "email": "garanov.ilya.working@gmail.com"
   },
+  "homepage": "https://github.com/Ilya-Garanov-WorkingAcc/Safe-Dev-Plugin-for-CC",
   "license": "MIT",
-  "keywords": ["security", "secrets", "hooks", "testing", "redaction"]
+  "keywords": [
+    "security",
+    "secrets",
+    "hooks",
+    "prompt-injection",
+    "supply-chain",
+    "audit",
+    "wsl"
+  ]
 }

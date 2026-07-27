@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "policy_version": "2026.07-pilot",
+
+  "level": "audit",
+
+  "rule_levels": {
+    "secret-egress": "strict",
+    "secret-output": "strict",
+    "config-trust": "warn",
+    "privilege": "audit",
+    "command-destructive": "audit",
+    "git-destructive": "audit",
+    "persistence": "audit",
+    "anti-forensics": "audit",
+    "path-sensitive": "warn",
+    "injection": "warn",
+    "platform": "warn",
+    "internal": "audit"
+  },
+
+  "protected_branches": ["main", "master", "release/*", "prod"],
+
+  "exclusions": [
+    "**/tests/**", "**/test/**", "**/*.test.*", "**/*.spec.*",
+    "**/fixtures/**", "**/__mocks__/**"
+  ],
+
+  "exemptions": [
+    {
+      "rule": "command-rm-recursive-outside-cwd",
+      "target_glob": "**/node_modules/**",
+      "reason": "чистка зависимостей",
+      "expires": "2026-12-31",
+      "approved_by": "head-of-dev"
+    }
+  ],
+
+  "session_memory": { "enabled": true, "ttl_hours": 24 },
+
+  "llm": { "enabled": false, "model": "haiku", "max_calls_per_session": 20 },
+
+  "audit": {
+    "retention_days": 30,
+    "export": { "type": "none", "path": null, "url": null, "token_env": null }
+  },
+
+  "ui": { "banner": true, "verbosity": "normal" }
+}

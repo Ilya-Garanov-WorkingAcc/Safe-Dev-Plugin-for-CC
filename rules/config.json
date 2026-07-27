@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "description": "«Горячие» ключи конфигурации репозитория (TS.md §10.2) — те, наличие или изменение которых означает возможность исполнения кода. Список один и живёт на правиле config-untrusted-new; остальные правила задают severity и обучающие сообщения для своих сценариев, а детектор берёт объединение hot_keys по всем правилам kind=config_key.",
+  "rules": [
+    {
+      "id": "config-untrusted-new",
+      "class": "config-trust",
+      "severity": "HIGH",
+      "match": {
+        "kind": "config_key",
+        "hot_keys": [
+          "hooks",
+          "mcpServers",
+          "apiKeyHelper",
+          "env",
+          "enabledPlugins",
+          "extraKnownMarketplaces",
+          "permissions",
+          "statusLine",
+          "fileSuggestion",
+          "awsCredentialExport",
+          "awsAuthRefresh",
+          "gcpAuthRefresh",
+          "otelHeadersHelper",
+          "autoMemoryDirectory",
+          "outputStyle",
+          "forceLoginMethod",
+          "sandbox"
+        ]
+      },
+      "message": "Репозиторий содержит конфигурацию, способную исполнять код, и ещё не подтверждён на этой машине. Хуки из .claude/settings.json и команды запуска из .mcp.json выполняются при старте сессии — до того, как вы увидите содержимое проекта.",
+      "remediation": "Прочитайте перечисленные команды и URL. Если они ожидаемы — подтвердите: /secure-dev:trust. Если нет — закройте сессию и сообщите в #secure-dev; конфигурацию можно удалить перед повторным запуском.",
+      "reference": "docs/RUNBOOK.md#config-trust"
+    },
+    {
+      "id": "config-changed-hot",
+      "class": "config-trust",
+      "severity": "HIGH",
+      "match": { "kind": "config_key" },
+      "message": "Конфигурация репозитория изменилась после того, как ей было выдано доверие.",
+      "remediation": "Сверьте изменения с историей git (git log -p -- .claude .mcp.json). Если правку внесли вы — подтвердите заново: /secure-dev:trust.",
+      "reference": "docs/RUNBOOK.md#config-trust"
+    },
+    {
+      "id": "config-quarantined",
+      "class": "config-trust",
+      "severity": "HIGH",
+      "match": { "kind": "config_key" },
+      "message": "Репозиторий находится в карантине: расхождение с подтверждённым слепком не разобрано.",
+      "remediation": "Разберите расхождение и подтвердите заново через /secure-dev:trust либо работайте без исполняемой конфигурации репозитория.",
+      "reference": "docs/RUNBOOK.md#config-trust"
+    }
+  ]
+}

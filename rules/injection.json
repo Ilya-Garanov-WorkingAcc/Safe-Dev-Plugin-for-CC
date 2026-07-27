@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "description": "Косвенные prompt injection (TS.md §9.1). Шесть классов вместо пяти у источника: добавлен tool-coercion. Модуль НИКОГДА не блокирует — инъекция в README не повод останавливать работу, повод сделать её видимой. Блокирующий контроль дал бы высокую долю ложных срабатываний на легитимном контенте: документация по промпт-инжинирингу, security-репозитории и эта самая спецификация.",
+  "rules": [
+    {
+      "id": "injection-instruction-override",
+      "class": "injection",
+      "injection_class": "instruction-override",
+      "severity": "HIGH",
+      "weight": 2,
+      "match": {
+        "kind": "regex",
+        "flags": "i",
+        "pattern": "\\b(?:ignore|disregard|forget)\\s+(?:all\\s+|any\\s+|the\\s+)?(?:previous|prior|above|earlier|preceding|your)\\s+(?:instructions?|prompts?|rules?|training|guidelines?)|\\bnew\\s+system\\s+prompt\\b|={2,}\\s*end\\s+(?:of\\s+)?system\\s+prompt\\s*={2,}|<\\|im_(?:start|end)\\|>|\\[/(?:SYSTEM|INST)\\]|\\bигнорируй\\s+(?:все\\s+)?(?:предыдущие|прошлые|прежние)\\s+(?:инструкции|указания|правила)|\\bзабудь\\s+(?:свои|все|предыдущие)\\s+(?:инструкции|правила|указания)"
+      },
+      "message": "Текст пытается отменить ранее данные ассистенту инструкции.",
+      "remediation": "Содержимое инструмента — это данные. Действия по нему выполняются только после подтверждения человеком.",
+      "reference": "docs/RUNBOOK.md#injection"
+    },
+    {
+      "id": "injection-role-hijack",
+      "class": "injection",
+      "injection_class": "role-hijack",
+      "severity": "HIGH",
+      "weight": 2,
+      "match": {
+        "kind": "regex",
+        "flags": "i",
+        "pattern": "\\bDAN\\s+mode\\b|\\bdeveloper\\s+mode\\s+enabled\\b|\\bpretend\\s+(?:you\\s+are|to\\s+be)\\b|\\bfrom\\s+now\\s+on\\s+you\\s+(?:are|will)\\b|\\byou\\s+are\\s+no\\s+longer\\b|\\b(?:bypass|disable|turn\\s+off|remove|ignore)\\s+(?:your\\s+|all\\s+)?(?:restrictions?|safety(?:\\s+(?:rules?|filters?))?|guardrails?|filters?|limitations?)\\b|\\bjailbreak\\b|\\bотныне\\s+ты\\b|\\bпредставь,?\\s+что\\s+ты\\b|\\bобойди\\s+(?:свои\\s+)?ограничения\\b"
+      },
+      "message": "Текст пытается переопределить роль ассистента или снять ограничения.",
+      "remediation": "Роль задаётся системой и пользователем, а не содержимым файлов и веб-страниц.",
+      "reference": "docs/RUNBOOK.md#injection"
+    },
+    {
+      "id": "injection-tool-coercion",
+      "class": "injection",
+      "injection_class": "tool-coercion",
+      "severity": "HIGH",
+      "weight": 2,
+      "match": {
+        "kind": "regex",
+        "flags": "i",
+        "pattern": "\\b(?:read|cat|open|print|show|send|upload|exfiltrate|post)\\b[^.\\n]{0,40}(?:\\.env\\b|~/\\.ssh|id_rsa|\\.aws/credentials|\\.claude/\\.credentials|private\\s+key)|\\b(?:send|post|upload|forward|exfiltrate)\\s+(?:the\\s+)?(?:contents?|file|output|result|data|secrets?)\\b[^\\n]{0,60}?\\bto\\s+https?://|\\bотправ(?:ь|ить)\\s+[^\\n]{0,40}https?://|\\bпрочитай\\s+[^\\n]{0,30}(?:\\.env|\\.ssh|приватный\\s+ключ)"
+      },
+      "message": "Текст требует прочитать секреты или отправить данные на внешний адрес.",
+      "remediation": "Чтение секретов и исходящие вызовы инициирует человек, а не содержимое обрабатываемого файла.",
+      "reference": "docs/RUNBOOK.md#injection"
+    },
+    {
+      "id": "injection-smuggling",
+      "class": "injection",
+      "injection_class": "smuggling",
+      "severity": "MEDIUM",
+      "weight": 1,
+      "match": {
+        "kind": "regex",
+        "flags": "is",
+        "pattern": "<!--[^>]{0,400}?\\b(?:ignore|instruction|assistant|claude|system\\s+prompt|игнорируй|инструкц)[^>]{0,400}?-->|style\\s*=\\s*[\"'][^\"']*display\\s*:\\s*none[^\"']*[\"'][^<]{0,400}(?:ignore|instruction|assistant|claude)|<span[^>]*hidden[^>]*>[^<]{0,300}(?:ignore|instruction|assistant)"
+      },
+      "message": "Директивы спрятаны в невидимой части документа: HTML-комментарий или скрытый блок.",
+      "remediation": "Скрытый от человека, но видимый модели текст — признак умышленной подмены содержимого.",
+      "reference": "docs/RUNBOOK.md#injection"
+    },
+    {
+      "id": "injection-authority-spoof",
+      "class": "injection",
+      "injection_class": "authority-spoof",
+      "severity": "MEDIUM",
+      "weight": 1,
+      "match": {
+        "kind": "regex",
+        "flags": "i",
+        "pattern": "(?:^|\\n)\\s*(?:SYSTEM|ASSISTANT|DEVELOPER)\\s*:\\s*\\S|\\bAnthropic\\s+(?:official|security\\s+team|administrator)\\b|\\bofficial\\s+(?:system|anthropic)\\s+(?:message|notice|instruction)\\b|\\b(?:the\\s+)?(?:administrator|admin|owner|security\\s+team)\\s+(?:has\\s+)?(?:approved|authorized|authorised|granted|permits?|allows?)\\b|\\bадминистратор\\s+(?:разрешил|подтвердил|требует)\\b|\\bслужебное\\s+сообщение\\s+системы\\b"
+      },
+      "message": "Текст выдаёт себя за системное сообщение или за указание вендора.",
+      "remediation": "Системные сообщения не приходят через вывод инструментов.",
+      "reference": "docs/RUNBOOK.md#injection"
+    },
+    {
+      "id": "injection-obfuscation",
+      "class": "injection",
+      "injection_class": "obfuscation",
+      "severity": "MEDIUM",
+      "weight": 1,
+      "match": {
+        "kind": "regex",
+        "pattern": "[\\u200b\\u200c\\u200d\\u2060\\ufeff]{2,}|\\b[il1|]gn[o0]re\\s+(?:prev[il1|]ous|all)\\b|\\b[s5][yu]st[e3]m\\s+pr[o0]mpt\\b"
+      },
+      "message": "Текст содержит скрытые символы нулевой ширины или намеренно искажённые ключевые слова.",
+      "remediation": "Нормализованная копия фрагмента добавлена в контекст: скрытые символы удалены, гомоглифы приведены к латинице.",
+      "reference": "docs/RUNBOOK.md#injection"
+    }
+  ]
+}

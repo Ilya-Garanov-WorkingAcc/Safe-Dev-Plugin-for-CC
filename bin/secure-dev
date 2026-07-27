@@ -1,0 +1,279 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""secure-dev — CLI плагина (TS.md §11).
+
+    secure-dev scan [PATH]      Pre-flight: проверка .claude/, .mcp.json и хуков
+                                ДО запуска claude. 0 = чисто, 1 = найдено, 2 = ошибка.
+    secure-dev trust [PATH]     Подтвердить конфигурацию репозитория осознанно
+    secure-dev report [--week]  Сводка из локального аудита
+    secure-dev doctor           Диагностика установки
+    secure-dev export           Ручной запуск выгрузки
+
+`scan` — единственный контроль, работающий ДО первого хука репозитория, и
+единственный, не участвующий в гонке на SessionStart (ARCHITECTURE §4.3).
+Обходится вызовом `command claude` напрямую — это принято: обёртка закрывает
+неумышленный сценарий, который и является основным.
+"""
+
+import argparse
+import datetime
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+from lib import audit, config, export, hookio, ruleset, trust    # noqa: E402
+
+EXIT_CLEAN = 0
+EXIT_FOUND = 1
+EXIT_ERROR = 2
+
+
+# --- scan ------------------------------------------------------------------
+
+def cmd_scan(args):
+    result = trust.evaluate(args.path)
+    if args.json:
+        print(json.dumps({
+            "repo_id": result["repo_id"],
+            "remote": result["remote"],
+            "root": result["root"],
+            "status": result["status"],
+            "changed": result["changed"],
+            "findings": result["findings"],
+        }, ensure_ascii=False, indent=2))
+    else:
+        print(trust.format_report(result))
+
+    return EXIT_CLEAN if result["status"] == trust.STATUS_TRUSTED else EXIT_FOUND
+
+
+# --- trust -----------------------------------------------------------------
+
+def cmd_trust(args):
+    result = trust.evaluate(args.path)
+    print(trust.format_report(result))
+
+    if result["status"] == trust.STATUS_TRUSTED and result["baseline"]:
+        print("\nРепозиторий уже подтверждён.")
+        return EXIT_CLEAN
+
+    if not args.yes:
+        print("\nПодтверждение означает: перечисленные команды и URL вам понятны "
+              "и ожидаемы.")
+        try:
+            answer = input("Подтвердить доверие этому репозиторию? [y/N] ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return EXIT_ERROR
+        if answer.strip().lower() not in ("y", "yes", "д", "да"):
+            print("Отменено. Статус репозитория не изменён.")
+            return EXIT_FOUND
+
+    baseline = trust.remember(result, trust.STATUS_TRUSTED)
+    audit.write({
+        "hook": "cli", "rule": "config-trusted", "class": "config-trust",
+        "severity": "HIGH", "level": config.level(), "action": "logged",
+        "target": result["remote"] or result["root"],
+        "evidence": "trusted_by={} keys={}".format(
+            baseline["trusted_by"], ",".join(baseline["hot_keys_present"])),
+    }, {"cwd": result["root"]})
+    print("\nСтатус: trusted. Подтвердил: {} в {}.".format(
+        baseline["trusted_by"], baseline["trusted_at"]))
+    return EXIT_CLEAN
+
+
+# --- report ----------------------------------------------------------------
+
+def cmd_report(args):
+    since = None
+    if args.week:
+        since = (datetime.date.today() - datetime.timedelta(days=7)).isoformat()
+
+    events, beats = [], []
+    for record in audit.iter_records():
+        if since and (record.get("ts") or "") < since:
+            continue
+        (beats if record.get("kind") == "heartbeat" else events).append(record)
+
+    if args.json:
+        print(json.dumps({"events": len(events), "heartbeats": len(beats)},
+                         ensure_ascii=False))
+        return EXIT_CLEAN
+
+    print("Сводка secure-dev {}".format("за неделю" if args.week else "за всё время"))
+    print("=" * 52)
+    print("Пользователь: {}@{}".format(audit.user(), audit.host()))
+    print("Версия плагина: {}".format(audit.plugin_version()))
+    print("Политика: {} (sha256 {}…, {})".format(
+        config.policy_version(), (config.policy_sha256() or "?")[:12],
+        config.seal_status()))
+    print("Уровень: {}".format(config.level()))
+    print("Сессий (heartbeat): {}".format(len(beats)))
+    print("Событий: {}".format(len(events)))
+
+    if beats:
+        last = beats[-1]
+        print("Последняя сессия: {} (WSL: {}, шаблон настроек: {})".format(
+            last.get("ts"), last.get("wsl"), last.get("settings_template_applied")))
+        tampered = [b for b in beats if b.get("policy_tampered")]
+        if tampered:
+            print("⚠ Правка политики зафиксирована в {} сессиях".format(len(tampered)))
+
+    by_rule = {}
+    for record in events:
+        key = record.get("rule") or "-"
+        by_rule[key] = by_rule.get(key, 0) + 1
+    if by_rule:
+        print("\nТоп правил:")
+        for rule_id, count in sorted(by_rule.items(), key=lambda kv: -kv[1])[:15]:
+            print("  {:6} {}".format(count, rule_id))
+
+    by_action = {}
+    for record in events:
+        key = record.get("action") or "-"
+        by_action[key] = by_action.get(key, 0) + 1
+    if by_action:
+        print("\nПо решениям:")
+        for action, count in sorted(by_action.items(), key=lambda kv: -kv[1]):
+            print("  {:6} {}".format(count, action))
+
+    latencies = sorted(r["latency_ms"] for r in events
+                       if isinstance(r.get("latency_ms"), int))
+    if latencies:
+        p95 = latencies[min(int(len(latencies) * 0.95), len(latencies) - 1)]
+        print("\nЛатентность: p50 {} мс, p95 {} мс".format(
+            latencies[len(latencies) // 2], p95))
+
+    print("\nЖурнал: {}".format(audit.audit_dir()))
+    print("Секретов и содержимого диалога в журнале нет по построению "
+          "(см. docs/ROLLOUT.md).")
+    return EXIT_CLEAN
+
+
+# --- doctor ----------------------------------------------------------------
+
+def cmd_doctor(args):
+    problems = []
+
+    def line(ok, text, hint=None):
+        print("  [{}] {}".format("OK " if ok else "!! ", text))
+        if not ok and hint:
+            print("       → {}".format(hint))
+            problems.append(text)
+
+    print("Диагностика secure-dev {}".format(audit.plugin_version()))
+    print("=" * 52)
+
+    line(audit.is_wsl(),
+         "Платформа: WSL" if audit.is_wsl() else "Платформа: не WSL",
+         "Политика отдела требует WSL2/Ubuntu: wsl -d Ubuntu")
+    line(sys.version_info >= (3, 8),
+         "Python {}.{}".format(*sys.version_info[:2]),
+         "Нужен python3 версии 3.8 или новее")
+
+    data = hookio.data_dir()
+    line(os.access(hookio.ensure_dir(data), os.W_OK),
+         "Каталог данных: {}".format(data),
+         "Нет прав на запись — аудит и реестр доверия работать не будут")
+    line(bool(os.environ.get("CLAUDE_PLUGIN_DATA")),
+         "CLAUDE_PLUGIN_DATA задан" if os.environ.get("CLAUDE_PLUGIN_DATA")
+         else "CLAUDE_PLUGIN_DATA не задан, используется фолбэк",
+         "Вне сессии Claude Code это нормально")
+
+    issues = config.validate()
+    line(not issues,
+         "policy.json валиден" if not issues
+         else "policy.json: {}".format("; ".join(issues)),
+         "Исправьте политику или обновите плагин")
+    line(config.seal_status() != "tampered",
+         "Печать политики: {}".format(config.seal_status()),
+         "Хеш policy.json не совпадает с релизным — переустановите плагин")
+
+    count = ruleset.loaded_count()
+    line(count > 30, "Правил загружено: {}".format(count),
+         "Часть наборов правил не читается")
+
+    applied = config.settings_template_applied()
+    line(applied,
+         "Рекомендуемый ~/.claude/settings.json применён" if applied
+         else "Рекомендуемый ~/.claude/settings.json НЕ применён",
+         "Запустите deploy/install.sh — без шаблона не действуют декларативные "
+         "запреты чтения секретов")
+    if not applied:
+        for item in config.missing_template_rules()[:10]:
+            print("       отсутствует: {}".format(item))
+
+    print("\nУровень: {}   Экспорт: {}".format(
+        config.level(), (config.audit_cfg().get("export") or {}).get("type")))
+    return EXIT_CLEAN if not problems else EXIT_FOUND
+
+
+# --- export ----------------------------------------------------------------
+
+def cmd_export(args):
+    cfg = config.audit_cfg().get("export") or {}
+    result = export.export_pending(cfg)
+    print("Режим: {}. Отправлено файлов: {}, пропущено: {}.".format(
+        cfg.get("type", "none"), result.sent, result.skipped))
+    if result.reason:
+        print("Причина: {}".format(result.reason))
+    return EXIT_CLEAN if result.ok else EXIT_FOUND
+
+
+# --- точка входа -----------------------------------------------------------
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="secure-dev",
+        description="Контроль безопасной разработки для Claude Code")
+    sub = parser.add_subparsers(dest="command")
+
+    scan = sub.add_parser("scan", help="проверить конфигурацию репозитория")
+    scan.add_argument("path", nargs="?", default=".")
+    scan.add_argument("--json", action="store_true")
+    scan.set_defaults(func=cmd_scan)
+
+    trust_cmd = sub.add_parser("trust", help="подтвердить конфигурацию репозитория")
+    trust_cmd.add_argument("path", nargs="?", default=".")
+    trust_cmd.add_argument("-y", "--yes", action="store_true",
+                           help="без интерактивного подтверждения")
+    trust_cmd.set_defaults(func=cmd_trust)
+
+    report = sub.add_parser("report", help="сводка из локального аудита")
+    report.add_argument("--week", action="store_true")
+    report.add_argument("--json", action="store_true")
+    report.set_defaults(func=cmd_report)
+
+    doctor = sub.add_parser("doctor", help="диагностика установки")
+    doctor.set_defaults(func=cmd_doctor)
+
+    exp = sub.add_parser("export", help="ручной запуск выгрузки аудита")
+    exp.set_defaults(func=cmd_export)
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not getattr(args, "func", None):
+        parser.print_help()
+        return EXIT_ERROR
+    try:
+        return args.func(args)
+    except KeyboardInterrupt:
+        return EXIT_ERROR
+    except Exception as exc:                                     # noqa: BLE001
+        sys.stderr.write("secure-dev: {}\n".format(exc))
+        return EXIT_ERROR
+
+
+if __name__ == "__main__":
+    sys.exit(main())

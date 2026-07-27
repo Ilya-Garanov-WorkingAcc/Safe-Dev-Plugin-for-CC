@@ -1,99 +1,206 @@
-# Safe_Development
+# secure-dev 2.0
 
-Claude Code plugin: redacts secrets (AWS, GitHub, Stripe, Slack, Google, npm,
-JWT, PEM, dotenv assignments, URL credentials, Bearer tokens) from tool output
-and blocks/asks on outgoing calls that carry them — **and** enforces a
-mandatory test battery every time a hook file is created or edited, blocking
-the edit until the battery passes.
+Плагин безопасной разработки для Claude Code. Преемник `safe-development` v1.x.
 
-Contents:
-- `hooks/secret_redactor.py` — PreToolUse (ask on egress with secrets) +
-  PostToolUse (redact tool output) hook.
-- `hooks/hook_test_runner.py` — PostToolUse meta-hook: after any `Write`/`Edit`/
-  `MultiEdit` under a `.claude/hooks/` directory (project or global), runs that
-  hook's `<name>.tests.py` battery; blocks (exit 2) on failure.
-- `skills/hook-development/` — methodology for writing, testing, and validating
-  Claude Code hooks (also usable stand-alone as `/safe-development:hook-development`).
+Отраслевые практики безопасной работы с агентом, собранные в один инструмент,
+плюс контроль, отсутствующий во всех проанализированных публичных аналогах, —
+**проверка целостности конфигурации клонированного репозитория**.
 
-Each hook ships with its own test battery (`hooks/secret_redactor.tests.py`,
-`hooks/hook_test_runner.tests.py`) — run manually with `python3 <file>`.
+- Платформа: **WSL2/Ubuntu** (ADR-007)
+- Рантайм: **только стандартная библиотека Python 3.8+**, ни одной внешней зависимости
+- Развёртывание: ручная установка из приватного marketplace, без managed settings
 
-## Install on another account / another computer
+---
 
-Requires Python 3 on PATH. Published at:
-https://github.com/Ilya-Garanov-WorkingAcc/Safe-Dev-Plugin-for-CC
-(public repo — GitHub does not allow spaces in repo names, so "Safe Dev Plugin
-for CC" became the slug `Safe-Dev-Plugin-for-CC`; the plugin's own internal
-name, used in install commands below, stays `safe-development` regardless —
-that comes from `plugin.json`, not the repo name).
+## Модель доверия — читать первым
 
-### Option A — install from the published GitHub repo
+Плагин ставится сотрудником вручную и **не защищён managed settings**. Это
+осознанное ограничение первого этапа, и оно определяет всю архитектуру.
 
-On the other account/computer, inside Claude Code:
+**Плагин — страховка и видимость, а не граница безопасности.**
 
-```
-/plugin marketplace add Ilya-Garanov-WorkingAcc/Safe-Dev-Plugin-for-CC
-/plugin install safe-development@safe-development-marketplace
-```
+Сотрудник может отключить его одной командой. Технически это не закрывается
+(угроза T11). Закрывается организационно: плагин пишет heartbeat при каждом
+старте сессии, и отключивший его перестаёт появляться в сводке. Вопрос
+переходит из технической плоскости, где он не решается, в управленческую, где
+рычаг есть.
 
-Restart the Claude Code session afterward (hooks load at session start) — or
-run `/reload-plugins` if available in your version.
+Что при этом работает в полном объёме: блокировка на `PreToolUse`,
+редактирование вывода на `PostToolUse`, блокировка `ConfigChange`, аудит и
+heartbeat. Хуки продолжают работать даже при `--dangerously-skip-permissions`.
 
-To update later, after pulling new commits into the repo:
-```
-/plugin marketplace update safe-development-marketplace
-/plugin update safe-development@safe-development-marketplace
-```
+Путь к жёсткому enforcement — `docs/ROADMAP.md`.
 
-### Option B — copy the folder directly (no GitHub, no publishing)
+---
 
-Copy the whole `safe-development/` directory to the other computer by any
-means (USB, scp, zip+email, etc.), then inside Claude Code on that machine:
+## Что закрывает
 
-```
-/plugin marketplace add /absolute/path/to/safe-development
-/plugin install safe-development@safe-development-marketplace
-```
+| Угроза | Контроль |
+|---|---|
+| Секрет уходит в исходящий вызов или в контекст модели | `secret_redactor` |
+| **RCE из клонированного репозитория** (CVE-2025-59536, CVE-2025-59356, CVE-2026-21852) | `config_trust` + `secure-dev scan` |
+| Разрушение рабочей машины: `rm -rf /`, `dd`, `mkfs`, форк-бомба | `command_guard` |
+| Потеря работы в git: `checkout --`, `reset --hard`, `clean -f`, force-push | `command_guard` |
+| Эскалация до root (в WSL sudo обычно без пароля) | `command_guard`, класс `privilege` |
+| Персистентность через `.bashrc`, cron, systemd, `/etc/wsl.conf` | `command_guard`, класс `persistence` |
+| Косвенные prompt injection в README, вебе и ответах MCP | `injection_scanner` |
+| Чтение ключей и учётных данных, в том числе через Bash | `path_guard` |
+| Обход через субагента | все хуки, политика идентична |
 
-Restart the session afterward.
+Чего плагин **не** делает: не ищет уязвимости в коде (ADR-004), не проверяет
+качество кода, не изолирует процесс, не заменяет secret scanning в CI.
 
-### Choosing scope
+---
 
-Both options default to **user scope** (applies across all of that user's
-projects — equivalent to what was previously hand-installed under
-`~/.claude/hooks` + `~/.claude/settings.json` in this session). To scope it to
-one project instead:
-
-```
-/plugin install safe-development@safe-development-marketplace --scope project
-```
-
-### Verify it's working
-
-```
-/plugin list
-```
-
-should show `safe-development` enabled. Then run, in any project:
+## Установка
 
 ```bash
-echo "AWS_KEY=AKIAIOSFODNN7EXAMPLE" > /tmp/probe.env
+git clone https://github.com/Ilya-Garanov-WorkingAcc/Safe-Dev-Plugin-for-CC.git ~/secure-dev
+cd ~/secure-dev && git checkout dev2.0
+bash deploy/install.sh
 ```
 
-and `Read` that file back — you should see `AWS_ACCESS_KEY_ID=[REDACTED:AWS_ACCESS_KEY_ID]`
-instead of the real value. Create a throwaway hook under `.claude/hooks/foo.py`
-without a `foo.tests.py` next to it — you should get a reminder that a battery
-is missing.
+Затем в Claude Code:
 
-## Notes
+```
+/plugin marketplace add ~/secure-dev
+/plugin install secure-dev@secure-dev-marketplace
+```
 
-- Audit log for redactions: `~/.claude/safe-development-audit.log` (fixed
-  location, independent of the plugin's cache path so it survives plugin
-  updates — plugin files themselves live under
-  `~/.claude/plugins/cache/.../` and get replaced/pruned on update).
-- No official Anthropic or community marketplace plugin currently covers hook
-  development/testing (checked July 2026) — this plugin and its bundled skill
-  fill that gap; it's a personal/team plugin, not something published to the
-  official marketplace.
-- Validate the manifest any time with `claude plugin validate .` from inside
-  `safe-development/`.
+Проверка: `secure-dev doctor`.
+
+Установщик ставит CLI в `~/.local/bin`, доливает рекомендуемые правила в
+`~/.claude/settings.json` (с резервной копией существующего) и добавляет в
+`~/.bashrc` обёртку с pre-flight-проверкой незнакомых репозиториев.
+
+---
+
+## Слои контроля
+
+```
+СЛОЙ 0  ~/.claude/settings.json — декларативные запреты.
+        Работает даже при отключённом плагине. Не защищён от правки,
+        но факт его применения попадает в heartbeat.
+
+СЛОЙ 1  Плагин: контекстные решения, невыразимые декларативно —
+        семантика команд, содержимое файла, целостность конфига
+        репозитория, распознавание инъекций, аудит, heartbeat.
+
+СЛОЙ 2  secure-dev scan — pre-flight ДО запуска claude.
+        Единственный контроль, работающий до первого хука репозитория.
+
+СЛОЙ 3  JSONL-аудит и heartbeat → export: none | file | http.
+```
+
+---
+
+## Устройство
+
+```
+.claude-plugin/    plugin.json, marketplace.json
+hooks/             9 хуков + тест-батарея на каждый + hooks.json
+lib/               hookio, config, policy, audit, export, cmdparse,
+                   ruleset, redact, trust
+rules/             secrets, commands, paths, injection, config — правила в данных
+policy.json        политика отдела (+ schema, + lock с хешем релиза)
+bin/secure-dev     CLI: scan, trust, report, doctor, export
+commands/          /secure-dev:trust, :report, :policy
+skills/            hook-development (v1.x), security-policy
+deploy/            settings.template.json, bashrc-snippet.sh, install.sh
+tools/             migrate_audit.py, seal_policy.py
+tests/             ядро, парсер, корпус обходов, e2e
+docs/              ARCHITECTURE, TS, PLAN, ROLLOUT, RUNBOOK, ROADMAP
+```
+
+### Два принципа, определяющие остальное
+
+**Правила живут в данных, а не в коде** (ADR-005). Обновление набора правил не
+требует правки Python и, значит, полного цикла ревью security-критичной логики.
+
+**Режим отказа зависит от роли модуля** (ARCHITECTURE §4.1). Модули, которые
+редактируют или предупреждают, — fail-open: их сбой не должен ломать работу.
+Модули, которые блокируют, — fail-closed: сбой даёт `ask`, а не `allow`, иначе
+атакующий подбирает вход, роняющий парсер, и получает обход. Именно `ask`, а не
+`deny`: баг плагина не должен останавливать работу команды.
+
+---
+
+## Конфигурация
+
+```
+policy.json                        ~/.claude/secure-dev.local.json
+  в репозитории плагина              личный файл сотрудника
+  приезжает с обновлением            whitelist ключей
+        ↓                                    ↓
+  уровни, severity, исключения,      ТОЛЬКО ужесточение,
+  защищённые ветки, экспорт          доп. правила, косметика
+```
+
+Инвариант: локальный файл может только ужесточить. Попытка смягчить
+игнорируется молча для пользователя и громко для журнала
+(`LOCAL_OVERRIDE_REJECTED`).
+
+Уровни: `audit` → `warn` → `strict`. Пилотная конфигурация — `audit` для всего,
+кроме класса `secret-*`, который работает в `strict` с первого дня: его
+поведение обкатано в v1.x.
+
+---
+
+## Что попадает в журнал
+
+`${CLAUDE_PLUGIN_DATA}/audit/YYYY-MM-DD.jsonl`, права `0600`, на пилоте никуда
+не отправляется.
+
+Только метаданные операций: инструмент, правило, цель, усечённое и
+отредактированное `evidence`, латентность, ветка, репозиторий.
+
+**Никогда:** тексты промптов, ответы модели, полное содержимое файлов, реальные
+значения секретов. Это инвариант, проверяемый тестами каждого модуля, а не
+обещание. Подробно — `docs/ROLLOUT.md`.
+
+---
+
+## Разработка
+
+```bash
+python3 tests/run_all.py      # все батареи + проверка покрытия
+bash tests/e2e.sh             # интеграционные сценарии
+python3 tools/seal_policy.py  # зафиксировать хеш политики перед релизом
+```
+
+Каждый хук обязан иметь `<name>.tests.py` рядом. Мета-хук `hook_test_runner`
+прогоняет батарею после каждого изменения хука и возвращает `exit 2` при
+провале — это правило применяется и к самому плагину.
+
+Требования к тестам (TS.md §16): позитивные и негативные кейсы на каждое
+правило, корпус обходов, проверка отсутствия утечки секретов и диалога в
+журнал, проверка режима отказа, кодировок и бюджета латентности.
+
+---
+
+## Отклонения от спецификации
+
+Зафиксированы осознанно; в остальном реализация следует `docs/TS.md`.
+
+| Что | Как в TS.md | Как реализовано | Почему |
+|---|---|---|---|
+| Эталонный хеш политики | внутри `plugin.json` | отдельный `policy.lock.json` | Манифест проверяется схемой Claude Code; лишнее поле стоило бы совместимости |
+| Логика доверия | внутри `config_trust.py` | вынесена в `lib/trust.py` | Тот же код нужен CLI: `secure-dev scan` работает до запуска claude |
+| `git-checkout-discard` | одно правило на `checkout --` и `restore` | два правила | Условия объединялись бы по И вместо ИЛИ |
+| Запись в shell-конфиг | одно правило | `command-shell-rc-write` + `-indirect` | Перенаправление и утилита записи — разные конструкции |
+| Маркер экспорта | «файлы помечаются `.exported`» | маркер хранит выгруженный размер | Сравнение по mtime теряет записи: ядро проставляет метки грубым таймером |
+
+---
+
+## Документация
+
+| Документ | Для кого |
+|---|---|
+| `docs/ROLLOUT.md` | Сотрудник: что делает плагин и что собирает |
+| `docs/RUNBOOK.md` | Сотрудник: что делать при каждом классе срабатывания |
+| `docs/ARCHITECTURE.md` | Разработчик: модель угроз, слои, ADR |
+| `docs/TS.md` | Разработчик: контракты модулей и форматы |
+| `docs/PLAN.md` | Ведущий: фазы разработки и раскатки |
+| `docs/ROADMAP.md` | Ведущий: путь к managed settings |
+
+Лицензия: MIT.

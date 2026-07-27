@@ -1,12 +1,81 @@
 {
+  "description": "secure-dev — контроль безопасной разработки (TS.md §14). Все хуки в exec-форме (command + args): ${CLAUDE_PLUGIN_ROOT} может содержать пробелы, и шелл-квотинг в строковой форме зависел бы от интерпретатора. audit_flush помечен async — выгрузка не должна задерживать завершение сессии.",
   "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|fork",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/session_guard.py"],
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/config_trust.py"],
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/platform_guard.py"],
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "ConfigChange": [
+      {
+        "matcher": "project_settings|local_settings|user_settings|skills",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/config_trust.py"],
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/command_guard.py"],
+            "timeout": 5,
+            "statusMessage": "secure-dev: проверка команды"
+          }
+        ]
+      },
+      {
+        "matcher": "Read|Glob|Grep|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/path_guard.py"],
+            "timeout": 5
+          }
+        ]
+      },
       {
         "matcher": "Bash|WebFetch|WebSearch|Write|Edit|MultiEdit|mcp__.*",
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/hooks/secret_redactor.py"
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/secret_redactor.py"],
+            "timeout": 5
           }
         ]
       }
@@ -17,7 +86,20 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/hooks/secret_redactor.py"
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/secret_redactor.py"],
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Read|WebFetch|Bash|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/injection_scanner.py"],
+            "timeout": 10
           }
         ]
       },
@@ -26,7 +108,34 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}\"/hooks/hook_test_runner.py"
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/hook_test_runner.py"],
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/session_guard.py"],
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/audit_flush.py"],
+            "timeout": 15,
+            "async": true
           }
         ]
       }

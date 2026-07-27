@@ -1,0 +1,344 @@
+{
+  "schema_version": 1,
+  "description": "Стартовый набор TS.md §8.2. Правила описывают, ЧТО опасно; разбор команды (cmdparse) отвечает на вопрос, что это за команда. Разделение намеренное: набор обновляется без ревью security-критичного Python (ADR-005). Где TS.md указывает одно правило для двух разных конструкций (запись через перенаправление и через утилиту), заведено два id — иначе условия пришлось бы объединять по И вместо ИЛИ.",
+  "rules": [
+    {
+      "id": "command-sudo",
+      "class": "privilege",
+      "severity": "CRITICAL",
+      "match": { "kind": "command", "argv0": ["sudo", "doas", "pkexec"] },
+      "message": "Повышение привилегий из агента запрещено политикой. В типовой WSL-Ubuntu sudo настроен без пароля, поэтому команда сразу даёт root: необратимое разрушение вне $HOME, персистентность через cron и systemd, отключение самих контролей, правка /etc/wsl.conf с доступом к дискам Windows.",
+      "remediation": "Выполните команду сами в отдельном терминале — агенту root не выдаётся по политике.",
+      "reference": "docs/RUNBOOK.md#privilege"
+    },
+    {
+      "id": "command-rm-root",
+      "class": "command-destructive",
+      "severity": "CRITICAL",
+      "match": {
+        "kind": "command",
+        "argv0": ["rm"],
+        "flags_all": ["--recursive"],
+        "target_root": true
+      },
+      "message": "Рекурсивное удаление корня, домашнего каталога или каталога выше рабочего.",
+      "remediation": "Укажите конкретный подкаталог: rm -rf ./build. Если нужно очистить именно домашний каталог — сделайте это сами в терминале.",
+      "reference": "docs/RUNBOOK.md#command-destructive"
+    },
+    {
+      "id": "command-rm-no-preserve-root",
+      "class": "command-destructive",
+      "severity": "CRITICAL",
+      "match": {
+        "kind": "command",
+        "argv0": ["rm"],
+        "flags_any": ["--no-preserve-root"]
+      },
+      "message": "Флаг --no-preserve-root снимает единственную встроенную защиту rm от удаления корня.",
+      "remediation": "Уберите флаг и укажите конкретный путь.",
+      "reference": "docs/RUNBOOK.md#command-destructive"
+    },
+    {
+      "id": "command-rm-recursive-outside-cwd",
+      "class": "command-destructive",
+      "severity": "HIGH",
+      "match": {
+        "kind": "command",
+        "argv0": ["rm"],
+        "flags_all": ["--recursive"],
+        "target_outside_cwd": true
+      },
+      "message": "Рекурсивное удаление за пределами рабочего каталога.",
+      "remediation": "Перейдите в нужный каталог и удаляйте относительным путём либо удалите конкретный подкаталог проекта.",
+      "reference": "docs/RUNBOOK.md#command-destructive"
+    },
+    {
+      "id": "command-rm-dynamic-target",
+      "class": "command-destructive",
+      "severity": "MEDIUM",
+      "match": {
+        "kind": "command",
+        "argv0": ["rm"],
+        "flags_all": ["--recursive"],
+        "target_dynamic": true
+      },
+      "message": "Цель рекурсивного удаления вычисляется на лету — статически проверить, что именно будет удалено, невозможно.",
+      "remediation": "Подставьте путь явно либо сначала выведите его: echo <выражение>, убедитесь в результате, затем удаляйте.",
+      "reference": "docs/RUNBOOK.md#command-destructive"
+    },
+    {
+      "id": "command-dd-device",
+      "class": "command-destructive",
+      "severity": "CRITICAL",
+      "match": {
+        "kind": "command",
+        "argv0": ["dd"],
+        "args_regex_any": ["of=/dev/"]
+      },
+      "message": "Запись напрямую на блочное устройство уничтожает файловую систему без возможности восстановления.",
+      "remediation": "Для образов используйте файл: dd if=... of=./image.img. Работа с устройствами — вручную и осознанно.",
+      "reference": "docs/RUNBOOK.md#command-destructive"
+    },
+    {
+      "id": "command-mkfs",
+      "class": "command-destructive",
+      "severity": "CRITICAL",
+      "match": {
+        "kind": "command",
+        "argv0": ["mkfs", "mkfs.*", "mke2fs", "fdisk", "sfdisk", "cfdisk",
+                  "parted", "wipefs", "shred", "blkdiscard"]
+      },
+      "message": "Разметка или затирание диска.",
+      "remediation": "Операции с разделами выполняются человеком вне агента.",
+      "reference": "docs/RUNBOOK.md#command-destructive"
+    },
+    {
+      "id": "command-fork-bomb",
+      "class": "command-destructive",
+      "severity": "CRITICAL",
+      "match": {
+        "kind": "regex",
+        "pattern": "([A-Za-z_:][A-Za-z0-9_]*)\\s*\\(\\s*\\)\\s*\\{[^}]*\\|[^}]*&[^}]*\\}\\s*;\\s*\\1"
+      },
+      "message": "Рекурсивная функция, порождающая процессы без ограничения, — форк-бомба.",
+      "remediation": "У такой конструкции нет легитимного применения. Для нагрузочных тестов используйте stress-ng с явными лимитами.",
+      "reference": "docs/RUNBOOK.md#command-destructive"
+    },
+    {
+      "id": "command-decode-pipe-shell",
+      "class": "command-destructive",
+      "severity": "CRITICAL",
+      "match": {
+        "kind": "command",
+        "argv0": ["sh", "bash", "zsh", "dash", "ksh"],
+        "piped_from_any": ["base64", "xxd", "uudecode", "openssl", "gunzip", "zcat"]
+      },
+      "message": "Декодирование данных с последующим исполнением в шелле. Единственное назначение конструкции — скрыть содержимое команды от проверки.",
+      "remediation": "Раскодируйте отдельно и покажите результат: echo <данные> | base64 -d. Исполнять — только после того, как содержимое прочитано.",
+      "reference": "docs/RUNBOOK.md#command-destructive"
+    },
+    {
+      "id": "command-curl-pipe-shell",
+      "class": "command-destructive",
+      "severity": "HIGH",
+      "match": {
+        "kind": "command",
+        "argv0": ["sh", "bash", "zsh", "dash", "ksh"],
+        "piped_from_any": ["curl", "wget", "fetch", "httpie", "http"]
+      },
+      "message": "Исполнение скрипта, скачанного из сети, без предварительного просмотра.",
+      "remediation": "Скачайте, прочитайте, затем запустите: curl -fsSL <url> -o /tmp/install.sh && less /tmp/install.sh && bash /tmp/install.sh",
+      "reference": "docs/RUNBOOK.md#command-destructive"
+    },
+    {
+      "id": "command-chmod-world",
+      "class": "command-destructive",
+      "severity": "HIGH",
+      "match": {
+        "kind": "command",
+        "argv0": ["chmod"],
+        "args_regex_any": ["(^|\\s)0?777(\\s|$)", "(^|\\s)a\\+rwx", "(^|\\s)o\\+w"]
+      },
+      "message": "Права 777 дают запись любому пользователю системы, включая процессы, работающие от чужого имени.",
+      "remediation": "Достаточно chmod 755 для каталогов и chmod 644 для файлов; для исполняемых скриптов — chmod +x.",
+      "reference": "docs/RUNBOOK.md#command-destructive"
+    },
+    {
+      "id": "command-shell-rc-write",
+      "class": "persistence",
+      "severity": "HIGH",
+      "match": {
+        "kind": "command",
+        "redirect_glob": ["**/.bashrc", "**/.bash_profile", "**/.bash_login",
+                          "**/.zshrc", "**/.zprofile", "**/.profile",
+                          "**/.bash_aliases", "**/.envrc", "**/.zshenv",
+                          "/etc/profile", "/etc/profile.d/**", "/etc/bash.bashrc"]
+      },
+      "message": "Дозапись в конфигурацию шелла — классический способ закрепиться в системе: код выполнится при каждом новом терминале.",
+      "remediation": "Изменения окружения проекта держите в .env или direnv-файле репозитория, а не в общем конфиге шелла. Если правка нужна — внесите её сами.",
+      "reference": "docs/RUNBOOK.md#persistence"
+    },
+    {
+      "id": "command-shell-rc-write-indirect",
+      "class": "persistence",
+      "severity": "HIGH",
+      "match": {
+        "kind": "command",
+        "argv0": ["tee", "sed", "cp", "mv", "install", "truncate", "ln", "dd", "patch"],
+        "target_glob": ["**/.bashrc", "**/.bash_profile", "**/.zshrc",
+                        "**/.zprofile", "**/.profile", "**/.bash_aliases",
+                        "**/.envrc", "**/.zshenv", "/etc/profile.d/**"]
+      },
+      "message": "Правка конфигурации шелла через утилиту записи — тот же персистентный RCE, что и дозапись через перенаправление.",
+      "remediation": "Внесите правку сами либо храните настройки в файле проекта.",
+      "reference": "docs/RUNBOOK.md#persistence"
+    },
+    {
+      "id": "command-crontab-write",
+      "class": "persistence",
+      "severity": "HIGH",
+      "match": { "kind": "command", "argv0": ["crontab", "at", "batch"] },
+      "message": "Планировщик задач исполняет команды без участия человека — точка закрепления в системе.",
+      "remediation": "Регулярные задачи проекта оформляйте в CI или в systemd-юните, добавленном человеком осознанно.",
+      "reference": "docs/RUNBOOK.md#persistence"
+    },
+    {
+      "id": "command-service-enable",
+      "class": "persistence",
+      "severity": "HIGH",
+      "match": {
+        "kind": "command",
+        "argv0": ["systemctl", "service", "update-rc.d", "chkconfig"],
+        "args_contain_any": ["enable", "--now", "link"]
+      },
+      "message": "Постоянный автозапуск сервиса.",
+      "remediation": "Для локальной разработки достаточно запустить сервис на время сессии: systemctl start <unit> вручную.",
+      "reference": "docs/RUNBOOK.md#persistence"
+    },
+    {
+      "id": "command-wsl-conf",
+      "class": "persistence",
+      "severity": "HIGH",
+      "match": {
+        "kind": "command",
+        "redirect_glob": ["/etc/wsl.conf", "/etc/fstab", "/etc/sudoers",
+                          "/etc/sudoers.d/**", "/etc/environment"]
+      },
+      "message": "Правка системной конфигурации WSL. Через /etc/wsl.conf и /etc/fstab перемонтируются диски Windows, через sudoers меняются правила эскалации.",
+      "remediation": "Такие изменения вносит администратор рабочей станции вручную.",
+      "reference": "docs/RUNBOOK.md#persistence"
+    },
+    {
+      "id": "command-mount",
+      "class": "persistence",
+      "severity": "HIGH",
+      "match": { "kind": "command", "argv0": ["mount", "umount", "losetup"] },
+      "message": "Монтирование файловых систем меняет видимую агенту часть машины и может открыть доступ к дискам хоста.",
+      "remediation": "Монтирование выполняется человеком; агенту достаточно уже примонтированных путей.",
+      "reference": "docs/RUNBOOK.md#persistence"
+    },
+    {
+      "id": "command-history-clear",
+      "class": "anti-forensics",
+      "severity": "MEDIUM",
+      "match": {
+        "kind": "regex",
+        "pattern": "(?:^|[;&|]\\s*)\\s*history\\s+-c\\b|\\bunset\\s+HISTFILE\\b|\\bHISTFILE\\s*=\\s*/dev/null\\b|\\brm\\b[^;&|]*\\.bash_history\\b|\\bhistory\\s+-w\\s*/dev/null\\b"
+      },
+      "message": "Очистка истории шелла — действие, у которого нет задачи разработки, но есть задача сокрытия следов.",
+      "remediation": "Если в историю попал секрет, сообщите об этом и отзовите его; чистка истории проблему не решает.",
+      "reference": "docs/RUNBOOK.md#anti-forensics"
+    },
+    {
+      "id": "git-checkout-discard",
+      "class": "git-destructive",
+      "severity": "HIGH",
+      "match": {
+        "kind": "command",
+        "argv0": ["git"],
+        "args_contain_all": ["checkout", "--"]
+      },
+      "message": "git checkout -- безвозвратно отбрасывает несохранённые изменения.",
+      "remediation": "Сохраните состояние: git stash push -m \"before-discard\" -- <путь>, затем повторите.",
+      "reference": "docs/RUNBOOK.md#git-destructive"
+    },
+    {
+      "id": "git-restore-discard",
+      "class": "git-destructive",
+      "severity": "HIGH",
+      "match": {
+        "kind": "command",
+        "argv0": ["git"],
+        "args_contain_all": ["restore"],
+        "args_not_contain_any": ["--staged", "--source", "-s"]
+      },
+      "message": "git restore перезаписывает файл содержимым индекса, теряя несохранённые изменения.",
+      "remediation": "Сначала git stash push -m \"before-restore\" -- <путь>; вернуть можно git stash pop.",
+      "reference": "docs/RUNBOOK.md#git-destructive"
+    },
+    {
+      "id": "git-reset-hard",
+      "class": "git-destructive",
+      "severity": "HIGH",
+      "match": {
+        "kind": "command",
+        "argv0": ["git"],
+        "args_contain_all": ["reset", "--hard"]
+      },
+      "message": "git reset --hard стирает изменения рабочего дерева и индекса.",
+      "remediation": "Для отката индекса достаточно git reset (без --hard); чтобы сохранить работу — git stash push -m \"before-reset\".",
+      "reference": "docs/RUNBOOK.md#git-destructive"
+    },
+    {
+      "id": "git-clean-force",
+      "class": "git-destructive",
+      "severity": "HIGH",
+      "match": {
+        "kind": "command",
+        "argv0": ["git"],
+        "args_contain_all": ["clean"],
+        "flags_all": ["--force"]
+      },
+      "message": "git clean --force удаляет неотслеживаемые файлы: конфиги окружения, локальные заметки, ещё не добавленный код.",
+      "remediation": "Сначала посмотрите список: git clean -n (или --dry-run). Нужные файлы добавьте в .gitignore или закоммитьте.",
+      "reference": "docs/RUNBOOK.md#git-destructive"
+    },
+    {
+      "id": "git-push-force-protected",
+      "class": "git-destructive",
+      "severity": "HIGH",
+      "match": {
+        "kind": "command",
+        "argv0": ["git"],
+        "args_contain_all": ["push"],
+        "flags_any": ["--force", "--force-with-lease"],
+        "branch_protected": true
+      },
+      "message": "Force-push в защищённую ветку переписывает историю у всей команды.",
+      "remediation": "Оформите изменения отдельной веткой и pull request: git push origin HEAD:refs/heads/fix/<тема>.",
+      "reference": "docs/RUNBOOK.md#git-destructive"
+    },
+    {
+      "id": "git-push-force-other",
+      "class": "git-destructive",
+      "severity": "MEDIUM",
+      "match": {
+        "kind": "command",
+        "argv0": ["git"],
+        "args_contain_all": ["push"],
+        "flags_any": ["--force", "--force-with-lease"],
+        "branch_unprotected": true
+      },
+      "message": "Force-push переписывает историю ветки; у коллег, работающих с ней, откат будет болезненным.",
+      "remediation": "Предпочтительно git push --force-with-lease: он откажет, если ветка изменилась после вашей последней выборки.",
+      "reference": "docs/RUNBOOK.md#git-destructive"
+    },
+    {
+      "id": "git-branch-delete-force",
+      "class": "git-destructive",
+      "severity": "MEDIUM",
+      "match": {
+        "kind": "command",
+        "argv0": ["git"],
+        "args_contain_all": ["branch"],
+        "flags_any": ["--delete-force"]
+      },
+      "message": "git branch -D удаляет ветку, даже если её коммиты никуда не влиты.",
+      "remediation": "Используйте git branch -d: он откажет для неслитой ветки. Восстановить можно по git reflog.",
+      "reference": "docs/RUNBOOK.md#git-destructive"
+    },
+    {
+      "id": "git-filter-branch",
+      "class": "git-destructive",
+      "severity": "HIGH",
+      "match": {
+        "kind": "command",
+        "argv0": ["git", "git-filter-repo"],
+        "args_contain_any": ["filter-branch", "filter-repo"]
+      },
+      "message": "Переписывание всей истории репозитория.",
+      "remediation": "Операция согласовывается с командой и выполняется по отдельной процедуре: все клоны придётся пересоздать.",
+      "reference": "docs/RUNBOOK.md#git-destructive"
+    }
+  ]
+}

@@ -1,16 +1,17 @@
 {
-  "name": "safe-development-marketplace",
+  "name": "secure-dev-marketplace",
   "owner": {
     "name": "Ilya Garanov",
     "email": "garanov.ilya.working@gmail.com"
   },
-  "description": "Marketplace for the Safe_Development plugin: secret redaction hook + mandatory hook test-battery enforcement + hook-development skill.",
+  "description": "Приватный marketplace отдела разработки. Содержит secure-dev — плагин безопасной работы с агентом: доверие к конфигурации репозитория, блокировка деструктивных команд, анонимизация секретов, детект инъекций, аудит и heartbeat.",
   "plugins": [
     {
-      "name": "safe-development",
+      "name": "secure-dev",
       "source": "./",
-      "description": "Redacts secrets from tool output/egress and blocks hook edits that fail their test battery.",
-      "version": "1.0.3"
+      "version": "2.0.0",
+      "description": "Контроль безопасной разработки: config_trust, command_guard, secret_redactor, injection_scanner, path_guard, platform_guard, аудит и heartbeat. Только WSL2/Ubuntu, только stdlib.",
+      "category": "security"
     }
   ]
 }
