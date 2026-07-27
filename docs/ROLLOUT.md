@@ -92,12 +92,34 @@ severity, что именно сработало, **рабочая альтер�
 Это не смягчающая формулировка, а инвариант: в тест-батарее каждого модуля
 есть негативный кейс на утечку, и релиз с такой утечкой не соберётся.
 
-Проверить самостоятельно можно в любой момент:
+Проверить самостоятельно можно в любой момент — журнал ваш и читается обычными
+средствами:
 
 ```bash
-secure-dev report --week
-cat ~/.claude/plugins/*/data/audit/*.jsonl | jq -r '.rule' | sort | uniq -c | sort -rn
+D=~/.claude/plugins/*/data/audit
+
+# Топ сработавших правил
+cat $D/*.jsonl | jq -r 'select(.kind=="event") | .rule' | sort | uniq -c | sort -rn
+
+# Что заблокировалось бы при переходе в strict
+cat $D/*.jsonl | jq -r 'select(.severity=="CRITICAL" or .severity=="HIGH")
+                        | [.rule, .evidence] | @tsv'
+
+# Латентность p95 — выше 150 мс на PreToolUse считается дефектом
+cat $D/*.jsonl | jq -s 'map(select(.latency_ms)) | map(.latency_ms)
+                        | sort | .[(length*0.95|floor)]'
+
+# Heartbeat: когда работали сессии и в каком режиме
+cat $D/*.jsonl | jq -r 'select(.kind=="heartbeat")
+                        | [.ts, .user, .plugin_version, .level, .policy_tampered]
+                        | @tsv'
+
+# Убедиться, что содержимого диалога в журнале нет
+cat $D/*.jsonl | jq -r 'keys[]' | sort -u
 ```
+
+Последняя команда выводит полный список полей, которые вообще встречаются в
+журнале. Полей с текстом промптов или ответов модели среди них нет.
 
 ### Зачем heartbeat
 
