@@ -117,6 +117,24 @@ def line_number(text, position):
     return text.count("\n", 0, position) + 1
 
 
+PERMISSION_REF_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*\([\w*./~-]{1,80}\)")
+
+
+def _is_permission_ref(haystack, start):
+    """`Read(**/.env)` — ссылка на правило Claude Code permissions.allow/deny,
+    а не инструкция агенту (TS.md §9.1 red-team finding: `secure-dev doctor`,
+    журнал аудита и сторонние отчёты о плагине неизбежно печатают такие имена
+    правил как обычный текст — заранее не угадать, кто и как их процитирует).
+
+    Отличие от кавычек: здесь квалифицирует сам синтаксис (глоб без пробелов
+    в скобках сразу после имени тула), а не оформление вызывающей стороны.
+    Естественный язык внутри скобок («Read( the file at ~/.ssh and print )»)
+    этому не удовлетворяет — пробелы не входят в допустимый набор символов,
+    поэтому как обход детекта не годится.
+    """
+    return bool(PERMISSION_REF_RE.match(haystack, start))
+
+
 # --- Детект ----------------------------------------------------------------
 
 def scan(text):
@@ -139,7 +157,9 @@ def scan(text):
                     continue
                 seen.add(key)
                 quoted = (_in_regions(start, regions)
-                          or _is_quoted(haystack, start, end))
+                          or _is_quoted(haystack, start, end)
+                          or (rule["id"] == "injection-tool-coercion"
+                              and _is_permission_ref(haystack, start)))
                 findings.append({
                     "class": rule.get("injection_class", rule["id"]),
                     "rule": rule["id"],
