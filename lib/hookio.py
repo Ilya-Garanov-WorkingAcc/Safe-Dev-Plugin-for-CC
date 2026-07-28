@@ -49,14 +49,55 @@ def plugin_root():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def _fallback_data_dir():
+    return os.path.expanduser(os.path.join("~", ".claude", "secure-dev"))
+
+
+_POINTER_NAME = "data_dir_pointer.txt"
+
+
 def data_dir():
     """Каталог состояния, переживающий обновление плагина (ARCHITECTURE §7.2).
 
-    ${CLAUDE_PLUGIN_DATA} задаётся Claude Code; фолбэк нужен для запуска вне
-    плагина — тесты, CLI, `secure-dev doctor`.
+    ${CLAUDE_PLUGIN_DATA} задаётся Claude Code только для процессов хуков,
+    объявленных в hooks.json. bin/secure-dev (а значит и команды
+    /secure-dev:trust, :report, :policy — они выполняют его через обычный
+    Bash-инструмент, не как хук) этой переменной не видит и без явной
+    синхронизации молча читал бы и писал ДРУГОЙ каталог, чем настоящие хуки —
+    аудит и доверие репозитория расходились бы между CLI и живой сессией.
+
+    Поэтому хук-процесс (у которого переменная есть) оставляет в фолбэк-
+    каталоге указатель на реальный путь; CLI без переменной подхватывает его.
     """
-    return os.environ.get("CLAUDE_PLUGIN_DATA") or os.path.expanduser(
-        os.path.join("~", ".claude", "secure-dev"))
+    env = os.environ.get("CLAUDE_PLUGIN_DATA")
+    fallback = _fallback_data_dir()
+    if env:
+        _remember_data_dir(env, fallback)
+        return env
+    return _recall_data_dir(fallback) or fallback
+
+
+def _remember_data_dir(real_dir, fallback):
+    if os.path.abspath(real_dir) == os.path.abspath(fallback):
+        return
+    try:
+        os.makedirs(fallback, exist_ok=True)
+        pointer = os.path.join(fallback, _POINTER_NAME)
+        tmp = pointer + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(os.path.abspath(real_dir))
+        os.replace(tmp, pointer)
+    except OSError:
+        pass
+
+
+def _recall_data_dir(fallback):
+    try:
+        with open(os.path.join(fallback, _POINTER_NAME), "r", encoding="utf-8") as fh:
+            path = fh.read().strip()
+    except OSError:
+        return None
+    return path or None
 
 
 def ensure_dir(path, mode=0o700):

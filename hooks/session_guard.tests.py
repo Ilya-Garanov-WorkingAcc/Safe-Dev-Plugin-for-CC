@@ -104,6 +104,32 @@ check("упомянут sudo", "sudo" in context)
 check("возвращены watchPaths",
       ".mcp.json" in ((result.get("hookSpecificOutput") or {}).get("watchPaths") or []))
 
+print("=== C2: формулировка sudo честна относительно уровня privilege ===")
+result = run()
+context = (result.get("hookSpecificOutput") or {}).get("additionalContext", "")
+check("на дефолтном audit — про журнал, не про недоступность",
+      "фиксируются в журнале" in context and "недоступна" not in context,
+      context[:90])
+
+with open(os.path.join(os.environ["HOME"], ".claude", "secure-dev.local.json"),
+          "w", encoding="utf-8") as fh:
+    json.dump({"rule_levels": {"privilege": "strict"}}, fh)
+config.reset_cache()
+result = run()
+context = (result.get("hookSpecificOutput") or {}).get("additionalContext", "")
+check("на strict — про недоступность", "недоступна" in context, context[:90])
+
+result = run(event="SubagentStart", agent_id="agent-2")
+context = (result.get("hookSpecificOutput") or {}).get("additionalContext", "")
+check("субагент на strict — тоже про недоступность", "недоступен" in context,
+      context[:90])
+
+with open(os.path.join(os.environ["HOME"], ".claude", "secure-dev.local.json"),
+          "w", encoding="utf-8") as fh:
+    json.dump({}, fh)
+config.reset_cache()
+result = run()          # D переиспользует `result` — вернуть его к SessionStart
+
 print("=== D: баннер ===")
 check("баннер показан", "secure-dev" in result.get("systemMessage", ""),
       result.get("systemMessage", "")[:60])

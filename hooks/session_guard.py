@@ -61,6 +61,17 @@ def banner(fields, repo_line):
     ])
 
 
+def _sudo_clause():
+    """Формулировка обязана отражать реальный уровень privilege, а не
+    декларировать блокировку, которой на audit/warn нет (red-team finding:
+    баннер утверждал недоступность sudo, пока реально шли только логи)."""
+    sudo_level = config.effective_level("command-sudo", "privilege")
+    if sudo_level == "strict":
+        return "Команда sudo агенту недоступна по политике."
+    return "Попытки sudo фиксируются в журнале, но не блокируются на " \
+           "текущем уровне политики ({}).".format(sudo_level)
+
+
 def context_text(fields):
     """Факты о сессии. Ни одного повелительного наклонения — см. TS.md §13.1."""
     parts = [
@@ -69,7 +80,7 @@ def context_text(fields):
         "Деструктивные команды файловой системы и git фиксируются в журнале"
         + (" и блокируются." if fields["level"] == "strict" else "."),
         "Секреты в выводе инструментов заменяются плейсхолдерами.",
-        "Команда sudo агенту недоступна по политике.",
+        _sudo_clause(),
     ]
     if not fields["wsl"]:
         parts.append("Сессия запущена вне WSL; политика отдела требует WSL, "
@@ -111,8 +122,12 @@ def handle_subagent_start(data):
     hookio.context("SubagentStart",
                    "В этой сессии активен контроль secure-dev в режиме {}. "
                    "Политика для субагентов идентична основной: деструктивные "
-                   "команды фиксируются, sudo недоступен, секреты в выводе "
-                   "заменяются плейсхолдерами.".format(config.level()))
+                   "команды фиксируются, {} секреты в выводе "
+                   "заменяются плейсхолдерами.".format(
+                       config.level(),
+                       "sudo недоступен," if config.effective_level(
+                           "command-sudo", "privilege") == "strict"
+                       else "попытки sudo фиксируются в журнале,"))
 
 
 @hookio.guard(hookio.FAIL_OPEN, HOOK)

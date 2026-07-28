@@ -83,6 +83,35 @@ for path in audit.day_files():
 check("ошибка записана в аудит", "PARSER_ERROR" in blob)
 check("секрет не утёк в аудит", "ghp_aaa" not in blob)
 
+print("=== A2: hookio.data_dir() — CLI видит тот же каталог, что и хуки ===")
+# secret-egress finding: /secure-dev:trust, :report, :policy выполняются как
+# обычный Bash, а не как объявленный хук, поэтому CLAUDE_PLUGIN_DATA у них не
+# задан. Без указателя CLI молча читал бы и писал ДРУГОЙ каталог, чем живые
+# хуки — ровно это и наблюдал ручной прогон (аудит из report почти пуст).
+_saved_data_env = os.environ.pop("CLAUDE_PLUGIN_DATA", None)
+_fallback = hookio._fallback_data_dir()
+shutil.rmtree(_fallback, ignore_errors=True)
+try:
+    check("без CLAUDE_PLUGIN_DATA и без хука — фолбэк",
+          hookio.data_dir() == _fallback, hookio.data_dir())
+
+    real_dir = os.path.join(TMP, "real-hook-data")
+    os.environ["CLAUDE_PLUGIN_DATA"] = real_dir
+    seen = hookio.data_dir()
+    check("хук (переменная задана) видит реальный каталог", seen == real_dir, seen)
+    pointer = os.path.join(_fallback, hookio._POINTER_NAME)
+    check("хук оставил указатель в фолбэк-каталоге", os.path.isfile(pointer))
+
+    del os.environ["CLAUDE_PLUGIN_DATA"]
+    seen = hookio.data_dir()
+    check("CLI без переменной подхватывает каталог хуков через указатель",
+          seen == real_dir, seen)
+finally:
+    if _saved_data_env is not None:
+        os.environ["CLAUDE_PLUGIN_DATA"] = _saved_data_env
+    else:
+        os.environ.pop("CLAUDE_PLUGIN_DATA", None)
+
 print("=== B: config — только ужесточение ===")
 set_local({"level": "strict"})
 check("ужесточение принято", config.level() == "strict", config.level())

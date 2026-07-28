@@ -209,7 +209,11 @@ def cmd_doctor(args):
          "запреты чтения секретов")
     if not applied:
         for item in config.missing_template_rules()[:10]:
-            print("       отсутствует: {}".format(item))
+            # Обратные кавычки — не оформление: injection_scanner (TS.md §9.1)
+            # трактует цитату как упоминание, а не инструкцию, и не считает её
+            # признаком tool-coercion. Без них "Read(**/.env)" в этом же
+            # выводе сам похож на инструкцию прочитать .env (red-team finding).
+            print("       отсутствует: `{}`".format(item))
 
     print("\nУровень: {}   Экспорт: {}".format(
         config.level(), (config.audit_cfg().get("export") or {}).get("type")))
