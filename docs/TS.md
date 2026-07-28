@@ -826,7 +826,7 @@ detect: /proc/version содержит "microsoft" или "WSL"  → wsl=true
         ] }
     ],
     "PostToolUse": [
-      { "matcher": "*",
+      { "matcher": ".*",
         "hooks": [
           { "type": "command", "command": "python3",
             "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/secret_redactor.py"], "timeout": 10 }
@@ -861,6 +861,14 @@ detect: /proc/version содержит "microsoft" или "WSL"  → wsl=true
 
 Все хуки — exec-форма, чтобы `${CLAUDE_PLUGIN_ROOT}` с пробелами в пути не требовал
 квотинга. `audit_flush` помечен `async`: выгрузка не должна задерживать завершение сессии.
+
+**`matcher` — всегда JS-regex, никогда не голая `"*"`.** Голая `"*"` — невалидный
+regex («nothing to repeat»): найдено боевым прогоном через реальный `claude` CLI,
+что при таком матчере `secret_redactor` на `PostToolUse` тихо «съедал» событие —
+`injection_scanner` и `hook_test_runner` на том же событии ни разу не запускались,
+без единой ошибки в аудите. Юнит-тесты хуков это не ловят: они вызывают `.py`
+напрямую, минуя реальный движок матчинга. Для «на любой инструмент» — `".*"`.
+`tests/e2e.sh` проверяет каждый `matcher` через `re.compile()`.
 
 ---
 

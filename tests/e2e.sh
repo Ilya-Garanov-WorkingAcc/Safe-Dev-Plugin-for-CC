@@ -49,12 +49,26 @@ echo
 # --- Сценарий 1: манифест хуков --------------------------------------------
 echo "1. Манифест hooks.json"
 if python3 - "${ROOT}" <<'PY'
-import json, os, sys
+import json, os, re, sys
 root = sys.argv[1]
 manifest = json.load(open(os.path.join(root, "hooks", "hooks.json"), encoding="utf-8"))
 problems = []
 for event, groups in manifest["hooks"].items():
     for group in groups:
+        # Регрессия: "matcher": "*" — невалидный regex ("nothing to repeat"),
+        # из-за которого secret_redactor (matcher "*") в PostToolUse тихо
+        # съедал событие, а injection_scanner и hook_test_runner на том же
+        # событии ни разу не запускались — юнит-тесты хуков этого не ловят,
+        # они вызывают .py напрямую, минуя матчер. Найдено только боевым
+        # прогоном через реальный claude CLI. Матчер обязан быть либо точным
+        # именем/списком через |, либо валидным JS/Python-regex (".*", не "*").
+        matcher = group.get("matcher")
+        if matcher is not None:
+            try:
+                re.compile(matcher)
+            except re.error as exc:
+                problems.append("невалидный regex в матчере {} ({}): {}".format(
+                    event, matcher, exc))
         for entry in group["hooks"]:
             if entry.get("command") != "python3" or "args" not in entry:
                 problems.append("не exec-форма в {}".format(event))
@@ -62,6 +76,9 @@ for event, groups in manifest["hooks"].items():
             path = entry["args"][0].replace("${CLAUDE_PLUGIN_ROOT}", root)
             if not os.path.isfile(path):
                 problems.append("нет файла: " + path)
+if problems:
+    for p in problems:
+        print(p, file=sys.stderr)
 sys.exit(1 if problems else 0)
 PY
 then
