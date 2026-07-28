@@ -85,7 +85,7 @@ def handle_pre(data, tool):
     # 1) Запись в файл — предупреждаем, содержимое не трогаем.
     if tool in WRITE_TOOLS:
         path = tool_input.get("file_path")
-        if config.is_excluded(path):
+        if config.is_excluded(path, cwd=data.get("cwd")):
             hookio.passthrough()          # фикстуры и тесты — вне проверки
         chunks = []
         for field in WRITE_FIELDS:

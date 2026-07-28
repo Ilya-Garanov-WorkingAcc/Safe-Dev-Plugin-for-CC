@@ -301,16 +301,38 @@ def policy_version():
 
 # --- Исключения ------------------------------------------------------------
 
-def is_excluded(path):
+def is_excluded(path, cwd=None):
     """Тестовые файлы и фикстуры — вне проверок содержимого.
 
     В secure-claude-code это была переменная окружения; здесь — конфиг: список
     исключений относится к политике, а не к запуску.
+
+    Паттерны `exclusions` (`**/tests/**`, `**/fixtures/**` и т.п.) описывают
+    расположение ВНУТРИ репозитория. Claude Code передаёт `tool_input.file_path`
+    абсолютным путём — без приведения к пути относительно `cwd` совпадение
+    ловится по случайным родительским каталогам ВНЕ репозитория: у кого угодно,
+    чей домашний каталог или путь до проекта содержит сегмент `test`
+    (`~/test/…`, `/tmp/test-42/…`, CI-раннеры вида `/test/workdir` — обычное
+    дело), `**/test/**` молча выключает проверку контента для всего проекта.
+    Найдено боевым прогоном через реальный `claude` CLI: injection_scanner
+    ни разу не сработал на файле в каталоге `.../projects/test/...`, хотя вне
+    хука `scan()` на тот же текст находил инъекцию с уверенностью high —
+    юнит-тесты этого не поймали, потому что сами не запускаются из пути,
+    содержащего `test` выше корня репозитория.
     """
     if not path:
         return False
     from lib import ruleset
-    return ruleset.any_glob(load().get("exclusions") or [], path)
+    rel = path
+    if cwd and os.path.isabs(path):
+        try:
+            candidate = os.path.relpath(path, cwd)
+        except ValueError:
+            candidate = None
+        if candidate is None or candidate.startswith(".."):
+            return False   # путь вне репозитория — не тестовая фикстура проекта
+        rel = candidate
+    return ruleset.any_glob(load().get("exclusions") or [], rel)
 
 
 def exemption_for(rule_id, target):

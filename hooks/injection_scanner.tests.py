@@ -52,12 +52,12 @@ def detect(text):
     return scanner.confidence_of(findings, score), findings
 
 
-def run(text, session="inj", tool_use=None, target="README.md"):
+def run(text, session="inj", tool_use=None, target="README.md", cwd=None):
     _counter[0] += 1
     payload = {"hook_event_name": "PostToolUse", "tool_name": "Read",
                "session_id": "{}-{}".format(session, _counter[0]),
                "tool_use_id": tool_use or "tu-{}".format(_counter[0]),
-               "cwd": ROOT, "tool_input": {"file_path": target},
+               "cwd": cwd or ROOT, "tool_input": {"file_path": target},
                "tool_response": text}
     if tool_use:
         payload["session_id"] = session
@@ -261,6 +261,24 @@ with open(audit.day_file(), "r", encoding="utf-8") as fh:
 check("секрета нет ни в одном байте журнала аудита", SECRET not in raw_audit)
 check("в журнале нет полей содержимого диалога",
       not any(key in raw_audit for key in ("prompt_text", "\"messages\"", "transcript")))
+
+print("=== I: путь репозитория с сегментом 'test' в предках (регрессия бага) ===")
+# Claude Code передаёт tool_input.file_path абсолютным. Раньше is_excluded()
+# матчил "**/test/**" против ВСЕГО абсолютного пути, а не относительно cwd —
+# любой репозиторий, лежащий под .../test/... (обычное дело: ~/test/proj,
+# /tmp/test-42/proj, CI-раннеры), целиком выпадал из проверки. Найдено
+# боевым прогоном через реальный claude CLI: этот же текст с уверенностью
+# high находился офлайн через scan(), но хук ни разу не сработал в сессии.
+FAKE_CWD = "/home/user/projects/test/my-app"
+result = run(INJECTIONS[0][1], target="{}/README.md".format(FAKE_CWD), cwd=FAKE_CWD)
+hso = result.get("hookSpecificOutput") or {}
+check("репозиторий под путём с 'test' в предках не исключается целиком",
+      "additionalContext" in hso, str(result)[:80])
+
+result = run(INJECTIONS[0][1],
+             target="{}/tests/fixture.py".format(FAKE_CWD), cwd=FAKE_CWD)
+check("настоящая тестовая фикстура ВНУТРИ репозитория по-прежнему исключена",
+      result == {}, str(result)[:80])
 
 shutil.rmtree(TMP, ignore_errors=True)
 print("\nSUMMARY:", "ALL PASSED" if not FAILS else "FAILED({}) {}".format(

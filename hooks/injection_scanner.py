@@ -255,7 +255,7 @@ def main():
     tool_input = data.get("tool_input") or {}
     target = (tool_input.get("file_path") or tool_input.get("url")
               or tool_input.get("command"))
-    if isinstance(target, str) and config.is_excluded(target):
+    if isinstance(target, str) and config.is_excluded(target, cwd=data.get("cwd")):
         hookio.passthrough()
 
     text = extract_text(response)

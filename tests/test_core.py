@@ -139,6 +139,19 @@ check("валидация политики без ошибок", config.validate
 check("исключение тестовых путей", config.is_excluded("src/tests/test_a.py"))
 check("обычный путь не исключён", not config.is_excluded("src/app.py"))
 
+# Регрессия: репозиторий, лежащий по пути с сегментом "test" ВЫШЕ своего
+# корня (~/test/proj, /tmp/test-42/proj — обычное дело для CI и локальных
+# песочниц), не должен ложно попадать под "**/test/**" целиком. Найдено
+# боевым прогоном: injection_scanner ни разу не сработал на файле в
+# .../projects/test/test-SafeDev/…, хотя сам scan() инъекцию находил.
+check("абсолютный путь вне репозитория с 'test' в предках — не тестовая фикстура",
+      not config.is_excluded(
+          "/home/user/projects/test/my-app/readme.md", cwd="/home/user/projects/test/my-app"))
+check("тестовая фикстура ВНУТРИ репозитория распознаётся и по абсолютному пути",
+      config.is_excluded(
+          "/home/user/projects/test/my-app/tests/fixture.py",
+          cwd="/home/user/projects/test/my-app"))
+
 print("=== D: policy — severity, память, решения ===")
 check("CRITICAL в strict → deny",
       policy.decision_for("CRITICAL", "strict") == policy.DENY)
