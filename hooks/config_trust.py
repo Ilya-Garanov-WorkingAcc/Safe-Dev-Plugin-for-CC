@@ -90,6 +90,54 @@ def handle_session_start(data):
         rule["message"], trust.format_report(result), rule["remediation"]))
 
 
+def _hot_changed(result):
+    """Затронуло ли изменение горячие ключи (TS.md §10.6), а не просто «сейчас
+    где-то в репозитории есть горячий ключ».
+
+    `result["findings"]` — полный пере-скан текущего состояния репозитория,
+    он не говорит, что именно изменилось. Репозиторий, который когда-то был
+    доверен с `hooks` в settings.json, иначе блокировал бы вообще любую
+    последующую правку `.claude/*` — вплоть до файла, не имеющего отношения
+    к горячим ключам, — потому что `hooks` там всё ещё присутствует.
+    """
+    changed = set(result["changed"])
+    if not changed:
+        return False
+
+    baseline_hot_keys = set((result["baseline"] or {}).get("hot_keys_present") or [])
+    current_hot_keys = {f["key"] for f in result["findings"]}
+    if baseline_hot_keys != current_hot_keys:
+        return True                    # набор горячих ключей реально изменился
+
+    # Набор ключей тот же — но значение под уже известным горячим ключом
+    # могло смениться (например, команда в hooks заменена на другую).
+    # Ловим это, только если изменился именно файл/каталог, несущий ключ.
+    hot_bearing = {f["file"] for f in result["findings"]}
+    if changed & hot_bearing:
+        return True
+
+    return bool(changed & set(EXECUTABLE_ARTIFACTS))
+
+
+def _change_evidence(result):
+    """Конкретные команды/URL для изменившихся артефактов (PLAN.md 1.7).
+
+    Путь файла в отказе не даёт человеку основания решить, блокировать
+    подтверждённое расхождение или это ожидаемая правка — нужна именно та
+    строка, которая появилась. `findings` уже несёт `detail` (см.
+    `trust._executables`); здесь отбираются только записи по файлам, которые
+    реально входят в `result["changed"]`, а не все горячие ключи репозитория.
+    """
+    changed = set(result["changed"])
+    lines = []
+    for finding in result["findings"]:
+        if finding["file"] not in changed:
+            continue
+        for item in finding["detail"]:
+            lines.append("{} → {}".format(finding["key"], item))
+    return lines
+
+
 def handle_config_change(data):
     result = trust.evaluate(data.get("cwd") or os.getcwd())
     source = data.get("source") or "unknown"
@@ -97,8 +145,7 @@ def handle_config_change(data):
     if not result["changed"] and result["status"] != trust.STATUS_QUARANTINED:
         hookio.passthrough()
 
-    hot_changed = bool(result["findings"]) or any(
-        name in EXECUTABLE_ARTIFACTS for name in result["changed"])
+    hot_changed = _hot_changed(result)
 
     rule = _rule("config-changed-hot")
     level = config.effective_level(rule["id"], rule.get("class"))
@@ -116,6 +163,9 @@ def handle_config_change(data):
 
     detail = "Источник: {}. Изменились: {}.".format(
         source, ", ".join(result["changed"]) or "исполняемые ключи")
+    evidence = _change_evidence(result)
+    if evidence:
+        detail += "\n" + "\n".join(evidence[:10])
 
     if level == "strict":
         trust.remember(result, trust.STATUS_QUARANTINED)

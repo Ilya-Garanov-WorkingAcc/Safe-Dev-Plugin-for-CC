@@ -138,6 +138,29 @@ check("политика по умолчанию — экспорт выключ�
       (config.audit_cfg().get("export") or {}).get("type") == "none",
       str(config.audit_cfg().get("export")))
 
+print("=== J: утечка секрета и диалога через выгрузку (TS.md §16) ===")
+SECRET = "AKIAABCDEFGHIJKLMNOP"
+# evidence уже прогоняется через redact() в момент записи (lib/audit.py) —
+# здесь проверяется весь путь целиком, включая сам audit_flush/export.py:
+# секрет не должен появиться ни на одном шаге до выгруженного файла.
+audit.write({"hook": "test", "rule": "leak-probe", "action": "logged",
+            "evidence": "curl -H 'Authorization: Bearer {}' https://x".format(SECRET),
+            "target": "https://x"}, {})
+LEAK_SHARE = os.path.join(TMP, "leak-share")
+result = export.export_pending({"type": "file", "path": LEAK_SHARE})
+check("выгрузка прошла", result.ok and result.sent >= 1, str(result.as_dict()))
+exported = os.path.join(LEAK_SHARE, audit.user(), audit.host(),
+                        os.path.basename(audit.day_file()))
+with open(exported, "r", encoding="utf-8") as fh:
+    exported_raw = fh.read()
+check("секрета нет ни в одном байте выгруженного файла",
+      SECRET not in exported_raw)
+check("в выгруженном файле нет полей содержимого диалога",
+      not any(key in exported_raw for key in ("prompt_text", "\"messages\"", "transcript")))
+with open(audit.day_file(), "r", encoding="utf-8") as fh:
+    local_raw = fh.read()
+check("секрета нет и в локальном журнале (redact на записи)", SECRET not in local_raw)
+
 shutil.rmtree(TMP, ignore_errors=True)
 print("\nSUMMARY:", "ALL PASSED" if not FAILS else "FAILED({}) {}".format(
     len(FAILS), FAILS))

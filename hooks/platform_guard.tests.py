@@ -124,6 +124,38 @@ for payload in ("", "{битый", json.dumps({"hook_event_name": "PreToolUse"})
     check("rc 0 на входе {!r}".format(payload[:12]), proc.returncode == 0,
           proc.stderr[:60])
 
+print("=== G: утечка секрета и диалога (TS.md §16) ===")
+SECRET = "AKIAABCDEFGHIJKLMNOP"
+builtins.open = fake_proc_version("Linux version 6.8.0-generic")
+_counter[0] += 1
+payload = {"hook_event_name": "SessionStart", "source": "startup",
+          "session_id": "plg-leak-{}".format(_counter[0]), "cwd": ROOT,
+          "tool_response": "AWS_KEY={}".format(SECRET),
+          "transcript_path": "/tmp/does-not-exist-{}.jsonl".format(SECRET)}
+old_in, old_out = sys.stdin, sys.stdout
+sys.stdin = io.StringIO(json.dumps(payload))
+sys.stdout = io.StringIO()
+try:
+    plg.main()
+except SystemExit:
+    pass
+finally:
+    out = sys.stdout.getvalue().strip()
+    sys.stdin, sys.stdout = old_in, old_out
+result = json.loads(out) if out else {}
+builtins.open = _real_open
+check("посторонние поля входа не просачиваются в ответ хука",
+      SECRET not in json.dumps(result))
+records = [r for r in audit.iter_records()
+          if r.get("hook") == "platform_guard" and SECRET in (r.get("evidence") or "")]
+check("evidence хука фиксирован (platform/os), а не эхо входа",
+      not records, str(len(records)))
+with open(audit.day_file(), "r", encoding="utf-8") as fh:
+    raw_audit = fh.read()
+check("секрета из постороннего поля нет в журнале аудита", SECRET not in raw_audit)
+check("в журнале нет полей содержимого диалога",
+      not any(key in raw_audit for key in ("prompt_text", "\"messages\"")))
+
 shutil.rmtree(TMP, ignore_errors=True)
 print("\nSUMMARY:", "ALL PASSED" if not FAILS else "FAILED({}) {}".format(
     len(FAILS), FAILS))

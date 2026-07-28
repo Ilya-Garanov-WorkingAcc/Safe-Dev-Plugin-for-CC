@@ -197,7 +197,18 @@ _FAIL_CLOSED_MESSAGE = (
 
 
 def guard(fail_mode, hook_name="unknown"):
-    """Декоратор main(). Ловит всё, что не SystemExit, и применяет режим отказа."""
+    """Декоратор main(). Ловит всё, что не SystemExit, и применяет режим отказа.
+
+    Механизм эскалации зависит от события — decision control не единообразен
+    (ARCHITECTURE §4.1, §10.5-10.6):
+      • PreToolUse   — ask() через permissionDecision.
+      • ConfigChange — умеет блокировать; эскалация через block_config(),
+        а не ask() (permissionDecision там не читается).
+      • SessionStart и прочие события без decision control — заблокировать
+        нечем, сбой неизбежно fail-open. Это не дыра, а факт возможностей
+        события: TS.md §10.5 явно говорит, что SessionStart не может
+        заблокировать сессию даже штатным путём.
+    """
     def deco(fn):
         def wrapper(*a, **kw):
             try:
@@ -206,8 +217,11 @@ def guard(fail_mode, hook_name="unknown"):
                 raise
             except BaseException as exc:            # noqa: BLE001 — это и есть точка
                 _audit_error(hook_name, exc)
-                if fail_mode == FAIL_CLOSED and _LAST_EVENT == "PreToolUse":
-                    ask(_LAST_EVENT, _FAIL_CLOSED_MESSAGE)
+                if fail_mode == FAIL_CLOSED:
+                    if _LAST_EVENT == "PreToolUse":
+                        ask(_LAST_EVENT, _FAIL_CLOSED_MESSAGE)
+                    elif _LAST_EVENT == "ConfigChange":
+                        block_config(_FAIL_CLOSED_MESSAGE)
                 sys.exit(0)
         return wrapper
     return deco

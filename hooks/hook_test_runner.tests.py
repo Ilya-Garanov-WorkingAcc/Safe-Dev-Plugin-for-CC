@@ -107,5 +107,33 @@ check("non-write tool -> noop", rc == 0 and out == "", f"rc={rc}")
 rc, out, err = subprocess.run(["python3", RUNNER], input="", capture_output=True, text=True).returncode, "", ""
 check("empty stdin -> rc0", rc == 0, f"rc={rc}")
 
+# Утечка секрета и диалога (TS.md §16). hook_test_runner не импортирует
+# lib/audit.py и не пишет журнал вообще — единственный канал наружу это
+# stdout/stderr самого процесса, туда и должно ничего не просочиться.
+SECRET = "AKIAABCDEFGHIJKLMNOP"
+with tempfile.TemporaryDirectory() as tmp_leak:
+    hooks_leak = os.path.join(tmp_leak, ".claude", "hooks")
+    write(os.path.join(hooks_leak, "lonely2.py"), "print('x')\n")
+    payload = {
+        "hook_event_name": "PostToolUse", "tool_name": "Edit", "session_id": "leak",
+        "tool_input": {
+            "file_path": os.path.join(hooks_leak, "lonely2.py"),
+            "old_string": "print('x')",
+            "new_string": "print('x')  # AWS_ACCESS_KEY_ID={}".format(SECRET),
+        },
+        "tool_response": "diff applied; leaked-in-transcript-marker {}".format(SECRET),
+    }
+    data_dir = os.path.join(tmp_leak, "data")
+    env = dict(os.environ)
+    env["CLAUDE_PLUGIN_DATA"] = data_dir
+    p = subprocess.run(["python3", RUNNER], input=json.dumps(payload),
+                       capture_output=True, text=True, env=env)
+    check("секрета из tool_input/tool_response нет в stdout раннера",
+          SECRET not in p.stdout, p.stdout[:80])
+    check("секрета из tool_input/tool_response нет в stderr раннера",
+          SECRET not in p.stderr, p.stderr[:80])
+    check("раннер не заводит собственный аудит-журнал",
+          not os.path.isdir(data_dir))
+
 print("\nSUMMARY:", "ALL PASSED" if not FAILS else f"FAILED {FAILS}")
 sys.exit(1 if FAILS else 0)

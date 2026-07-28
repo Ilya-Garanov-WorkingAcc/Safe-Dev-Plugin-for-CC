@@ -23,7 +23,13 @@ from lib import audit, cmdparse, hookio, policy, ruleset          # noqa: E402
 
 HOOK = "path_guard"
 
-FILE_TOOLS = {"Read", "Glob", "Grep", "Edit", "Write", "MultiEdit", "NotebookEdit"}
+# TS.md §12.1 требует закрыть ровно Read/Glob/Grep (+ Bash-ветку ниже) — то,
+# что не покрывают декларативные permissions.deny. Ограничено ровно тем, что
+# заматчено в hooks/hooks.json ("Read|Glob|Grep|Bash"): расширение сюда
+# Edit/Write/MultiEdit было бы мёртвым кодом — событие до этой ветки не дойдёт,
+# пока матчер не расширен, а расширять его вне контракта TS.md не входит в
+# задачу этого модуля (запись, а не чтение, — другая угроза).
+FILE_TOOLS = {"Read", "Glob", "Grep"}
 PATH_FIELDS = ("file_path", "path", "notebook_path")
 
 

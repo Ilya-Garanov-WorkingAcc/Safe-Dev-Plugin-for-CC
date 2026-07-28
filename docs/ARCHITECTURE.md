@@ -254,6 +254,11 @@ secure-dev/
 │   └── redact.py        # детекция секретов (из v1.x)
 ├── bin/
 │   └── secure-dev                     # CLI: scan, report, trust, doctor
+├── commands/
+│   ├── trust.md                       # /secure-dev:trust  — слэш-команды,
+│   ├── policy.md                      # /secure-dev:policy   а не skills/:
+│   └── report.md                      # /secure-dev:report   формат плагина
+│                                       # Claude Code требует их именно здесь
 ├── policy.json                        # ★ политика отдела, версионируется в git
 ├── policy.schema.json
 ├── rules/
@@ -261,7 +266,8 @@ secure-dev/
 │   ├── paths.json     injection.json
 ├── skills/
 │   ├── hook-development/              # v1.x
-│   └── security-policy/               # /secure-dev:trust, :report, :policy
+│   └── security-policy/               # контекстный skill: модель доверия,
+│                                       # уровни, конфиг — не слэш-команды
 ├── deploy/
 │   ├── settings.template.json         # рекомендуемый ~/.claude/settings.json
 │   ├── bashrc-snippet.sh              # обёртка claude + pre-flight

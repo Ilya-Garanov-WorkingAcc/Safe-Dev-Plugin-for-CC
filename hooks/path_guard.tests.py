@@ -151,6 +151,19 @@ for payload in ("", "{битый", json.dumps({"hook_event_name": "SessionStart"
     check("rc 0 на входе {!r}".format(payload[:12]), proc.returncode == 0,
           proc.stderr[:60])
 
+print("=== G: утечка секрета и диалога (TS.md §16) ===")
+SECRET = "AKIAABCDEFGHIJKLMNOP"
+decision, result = run("Bash",
+                       {"command": "cat ~/.ssh/id_ed25519 # token={}".format(SECRET)})
+check("команда с секретом рядом всё ещё блокируется",
+      decision in ("deny", "ask"), str(decision))
+check("секрета нет в собственном ответе хука", SECRET not in json.dumps(result))
+with open(audit.day_file(), "r", encoding="utf-8") as fh:
+    raw_audit = fh.read()
+check("секрета нет ни в одном байте журнала аудита", SECRET not in raw_audit)
+check("в журнале нет полей содержимого диалога",
+      not any(key in raw_audit for key in ("prompt_text", "\"messages\"", "transcript")))
+
 shutil.rmtree(TMP, ignore_errors=True)
 print("\nSUMMARY:", "ALL PASSED" if not FAILS else "FAILED({}) {}".format(
     len(FAILS), FAILS))
