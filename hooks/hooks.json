@@ -46,7 +46,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": ".*",
         "hooks": [
           {
             "type": "command",
@@ -54,23 +54,13 @@
             "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/command_guard.py"],
             "timeout": 5,
             "statusMessage": "secure-dev: проверка команды"
-          }
-        ]
-      },
-      {
-        "matcher": "Read|Glob|Grep|Bash",
-        "hooks": [
+          },
           {
             "type": "command",
             "command": "python3",
             "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/path_guard.py"],
             "timeout": 5
-          }
-        ]
-      },
-      {
-        "matcher": "Bash|WebFetch|WebSearch|Write|Edit|MultiEdit|mcp__.*",
-        "hooks": [
+          },
           {
             "type": "command",
             "command": "python3",
@@ -89,23 +79,13 @@
             "command": "python3",
             "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/secret_redactor.py"],
             "timeout": 10
-          }
-        ]
-      },
-      {
-        "matcher": "Read|WebFetch|Bash|mcp__.*",
-        "hooks": [
+          },
           {
             "type": "command",
             "command": "python3",
             "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/injection_scanner.py"],
             "timeout": 10
-          }
-        ]
-      },
-      {
-        "matcher": "Write|Edit|MultiEdit",
-        "hooks": [
+          },
           {
             "type": "command",
             "command": "python3",
