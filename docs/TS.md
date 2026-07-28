@@ -173,7 +173,7 @@ def load() -> Config: ...
 def effective_level(rule_id: str, rule_class: str = None) -> str: ...
 def policy_sha256() -> str: ...        # для heartbeat
 def is_tampered() -> bool: ...          # хеш != эталон из policy.lock.json
-def is_excluded(path: str) -> bool: ...
+def is_excluded(path: str, cwd: str = None) -> bool: ...
 ```
 
 `effective_level` резолвит уровень по приоритету: id правила → класс правила →
@@ -186,6 +186,18 @@ def is_excluded(path: str) -> bool: ...
 `policy.lock.json` (см. §3, отклонение от первоначального замысла хранить его
 в `plugin.json` — задокументировано в `lib/config.py`). Результат идёт в
 heartbeat.
+
+**`is_excluded` обязателен с `cwd`.** `exclusions` (`**/tests/**` и т.п.)
+описывают пути ВНУТРИ репозитория, но `tool_input.file_path` в реальном
+Claude Code приходит абсолютным. Без приведения к пути относительно `cwd`
+голый абсолютный путь матчится по случайным родительским каталогам ВНЕ
+репозитория — у кого угодно, чей путь до проекта содержит сегмент `test`
+(`~/test/proj`, `/tmp/test-42/proj`, CI-раннеры — обычное дело),
+`**/test/**` молча выключал бы `injection_scanner` и часть `secret_redactor`
+для всего проекта. Найдено боевым прогоном через реальный `claude` CLI —
+юнит-тесты хуков этого не ловят, если сами тестовые фикстуры (как этот
+репозиторий) лежат под путём с `test` в предках И используют относительные
+`target` вместо реалистичных абсолютных путей.
 
 ---
 
