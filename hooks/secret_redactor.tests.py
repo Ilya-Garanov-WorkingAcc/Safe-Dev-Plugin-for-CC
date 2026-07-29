@@ -52,6 +52,20 @@ A = [
     ("camelCase token",  "this.authToken = resp.data.token",                     False),
     ("Bearer короткий синтетический ключ (red-team round 5, finding 2)",
                           "Authorization: Bearer sk-test-canary",                  True),
+    ("ENV_SECRET нижний регистр (round 6, finding 2)",
+                          'db_password = "hunter2secret"',                         True),
+    ("ENV_SECRET camelCase",
+                          'apiToken = "abcdef123456"',                             True),
+    ("ENV_SECRET YAML нижний регистр",
+                          "password: hunter2secret",                               True),
+    ("ENV_SECRET формат AWS credentials-файла",
+                          "aws_secret_access_key = wJalrXUtnFEMI/K7MDENGbPxRfiCYX", True),
+    ("code: секрет.метод() нижний регистр — не должен стать FP",
+                          "secret = secret.replace('x','y')",                      False),
+    ("code: get_token() нижний регистр — не должен стать FP",
+                          "token = get_token(request)",                            False),
+    ("code: derive_password() нижний регистр — не должен стать FP",
+                          "password = derive_password(salt)",                      False),
 ]
 print("=== PART A: detection & code false-positives ===")
 for name, text, want in A:
