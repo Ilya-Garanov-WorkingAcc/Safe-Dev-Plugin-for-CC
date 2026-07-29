@@ -21,9 +21,11 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Модули ядра, покрытые общей батареей tests/test_core.py.
 CORE_COVERED = {"hookio", "config", "policy", "audit", "export", "ruleset",
                 "redact", "__init__"}
-# cmdparse покрыт отдельной батареей, trust — батареей config_trust.
+# cmdparse покрыт отдельной батареей, trust — батареей config_trust,
+# injection — батареей injection_scanner (реэкспортирует lib/injection.py).
 CORE_EXTRA = {"cmdparse": "tests/test_cmdparse.py",
-              "trust": "hooks/config_trust.tests.py"}
+              "trust": "hooks/config_trust.tests.py",
+              "injection": "hooks/injection_scanner.tests.py"}
 
 
 def batteries():

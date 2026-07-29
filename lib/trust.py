@@ -19,7 +19,7 @@ import fnmatch
 import hashlib
 import os
 
-from lib import audit, ruleset
+from lib import audit, injection, ruleset
 
 # Артефакты, определяющие, что репозиторий может исполнить (TS.md §10.1).
 ARTIFACT_FILES = (
@@ -232,6 +232,44 @@ def hot_findings(root):
         if os.path.isdir(full) and os.listdir(full):
             findings.append({"file": rel, "key": rel.rstrip("/"),
                              "detail": sorted(os.listdir(full))[:20]})
+    findings.extend(_claude_md_findings(root))
+    return findings
+
+
+def _claude_md_findings(root):
+    """CLAUDE.md, отсканированный тем же детектором, что и вывод инструментов
+    (round-6 red-team, finding 3): наличие/хеш файла уже трекается в
+    hash_artifacts() для дрейфа, но само по себе никак не влияло на решение
+    trusted/pending при первом клоне — репозиторий, чья единственная нагрузка
+    это вредоносный CLAUDE.md, проходил молча. Гейтим не по факту наличия
+    файла (он есть почти в каждом репозитории и это стало бы источником
+    постоянного трения), а по содержимому: находка появляется, только если
+    injection.scan() даёт confidence не ниже medium — то есть реальный,
+    неквотированный сигнал, а не обычный текст инструкций по работе с кодом.
+    """
+    findings = []
+    for rel in ARTIFACT_FILES:
+        if not rel.endswith("CLAUDE.md"):
+            continue
+        full = os.path.join(root, rel)
+        if not os.path.isfile(full):
+            continue
+        try:
+            with open(full, "r", encoding="utf-8", errors="replace") as fh:
+                text = fh.read(MAX_FILE_BYTES)
+        except OSError:
+            continue
+        detected, score = injection.scan(text)
+        confidence = injection.confidence_of(detected, score)
+        if confidence == "low":
+            continue
+        visible = [f for f in detected if not f["quoted"]] or detected
+        classes = sorted({f["class"] for f in visible})
+        findings.append({
+            "file": rel,
+            "key": "injection:{}".format(",".join(classes)),
+            "detail": [f["evidence"] for f in visible[:5]],
+        })
     return findings
 
 

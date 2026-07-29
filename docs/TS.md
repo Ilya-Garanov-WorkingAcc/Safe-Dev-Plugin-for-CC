@@ -109,8 +109,8 @@ def guard(fail_mode: str): ...              # декоратор main()
     "secret-egress":        "strict",
     "secret-output":        "strict",
     "config-trust":         "warn",
-    "command-destructive":  "audit",
-    "git-destructive":      "audit",
+    "command-destructive":  "strict",
+    "git-destructive":      "strict",
     "path-sensitive":       "warn",
     "injection":            "warn"
   },
@@ -643,6 +643,31 @@ awsCredentialExport / awsAuthRefresh / gcpAuthRefresh / otelHeadersHelper
 autoMemoryDirectory
 ```
 
+### 10.2a `CLAUDE.md` — гейт по содержимому, не по факту наличия
+
+Round-6 red-team, finding 3: хеш `CLAUDE.md` трекался в `artifacts` (§10.4) для
+дрейфа и раньше, но сам факт наличия/содержимого файла никак не влиял на
+решение `trusted`/`pending` при первом клоне — репозиторий, чья единственная
+нагрузка это вредоносный `CLAUDE.md` (без `hooks`/`mcpServers`), проходил
+молча, хотя это ровно тот же класс угрозы (косвенная инъекция, исполняемая
+до того, как содержимое проекта увидено).
+
+Гейтить по факту наличия файла нельзя: `CLAUDE.md` есть почти в каждом
+репозитории с Claude Code — в отличие от `hooks`/`mcpServers` это не редкий
+сигнал, а базовая практика, и такой гейт означал бы `pending` почти на любом
+первом клоне почти любого проекта — тот самый alert fatigue, которого
+архитектура сознательно избегает (`injection_scanner`: «низкая уверенность —
+только запись в журнал»).
+
+Вместо этого `trust.hot_findings()` прогоняет содержимое `CLAUDE.md` /
+`.claude/CLAUDE.md` через `lib/injection.py` (то же ядро, что использует
+`injection_scanner.py` на выводе инструментов) и добавляет находку, только
+если `confidence_of() != "low"` — то есть реальный, неквотированный сигнал
+(`class: tool-coercion`, `concealment` и т.п.), а не обычный текст с
+инструкциями по стеку/стилю кода. Обычный `CLAUDE.md` без таких сигналов
+по-прежнему проходит молча; изменение содержимого уже трекается хешем как и
+раньше (§10.5, «хеши разошлись» → `quarantined`) — эта часть не менялась.
+
 ### 10.3 `repo_id`
 
 ```
@@ -680,8 +705,8 @@ git remote get-url origin → нормализация (ssh/https → host/path,
 
 ```
 baseline отсутствует
-   ├─ горячих ключей нет  → status=trusted, тихо, exit 0
-   └─ горячие ключи есть  → status=pending
+   ├─ горячих ключей нет и CLAUDE.md чист (§10.2a) → status=trusted, тихо, exit 0
+   └─ горячие ключи есть ИЛИ CLAUDE.md даёт confidence ≥ medium → status=pending
                             additionalContext: перечень ключей + конкретные
                               команды/URL, которые будут исполнены +
                               инструкция подтвердить через /secure-dev:trust
