@@ -156,6 +156,70 @@ secure-dev doctor
 `CLAUDE_PLUGIN_DATA`, валидность и печать `policy.json`, число загруженных
 правил, применён ли `settings.template.json`.
 
+### Полное обновление плагина
+
+Claude Code копирует плагин из marketplace в свой кеш
+(`~/.claude/plugins/cache/...`) при установке, а не читает его "вживую" из
+`~/secure-dev` на каждой сессии. Значит, после правок в исходнике нужно явно
+попросить Claude Code перечитать marketplace и переустановить кеш — просто
+`git pull` в `~/secure-dev` для уже установленных копий сам по себе ничего не
+даёт.
+
+**Важно:** Claude Code сравнивает установленную и доступную версии по полю
+`version` в `.claude-plugin/plugin.json`/`marketplace.json`, а не по
+содержимому файлов. Если после правок оставить прежний номер версии,
+`/plugin update` увидит "то же самое" и не тронет кеш — даже если файлы
+реально изменились.
+
+1. **Обновить сам исходник (`~/secure-dev`):**
+
+   ```bash
+   cd ~/secure-dev
+   git pull origin main
+   ```
+
+2. **Если вы разрабатываете плагин и меняете его файлы** (а не только
+   подтягиваете чужие изменения) — перед коммитом обязательно поднять версию
+   в обоих манифестах, иначе шаг 4 ниже не сработает ни у кого:
+
+   ```bash
+   # .claude-plugin/plugin.json       → "version": "2.0.1" → "2.0.2"
+   # .claude-plugin/marketplace.json  → plugins[0].version — та же строка
+   python3 tools/seal_policy.py --stamp "$(date -Is)"   # если менялся policy.json
+   git add -A && git commit -m "..." && git push
+   ```
+
+3. **Обновить каталог marketplace** — Claude Code должен перечитать
+   `~/secure-dev` и увидеть новую версию:
+
+   ```
+   /plugin marketplace update secure-dev-marketplace
+   ```
+
+4. **Обновить установленную копию плагина**, указав ту область видимости,
+   с которой он ставился (`user` / `project` / `local` — см. таблицу в Шаге 3):
+
+   ```bash
+   claude plugin update secure-dev@secure-dev-marketplace --scope local
+   ```
+
+   Или через интерактивный `/plugin` → вкладка **Marketplaces** → `u` на
+   `secure-dev-marketplace`, затем вкладка **Installed** → обновить
+   `secure-dev`.
+
+5. **Перечитать хуки в уже открытой сессии**, не перезапуская `claude`:
+
+   ```
+   /reload-plugins
+   ```
+
+   Без этого шага текущая сессия продолжит использовать старые файлы хуков
+   из предыдущей версии кеша до следующего запуска `claude`.
+
+Если плагин установлен в нескольких областях видимости и/или в нескольких
+проектах (каждая — своя запись в `installed_plugins.json`), шаги 4–5 нужно
+повторить для каждой из них отдельно.
+
 ### Полное удаление
 
 Обратная последовательность: `/plugin uninstall secure-dev@secure-dev-marketplace
