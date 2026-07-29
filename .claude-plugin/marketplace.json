@@ -9,7 +9,7 @@
     {
       "name": "secure-dev",
       "source": "./",
-      "version": "2.0.0",
+      "version": "2.0.1",
       "description": "Контроль безопасной разработки: config_trust, command_guard, secret_redactor, injection_scanner, path_guard, platform_guard, аудит и heartbeat. Только WSL2/Ubuntu, только stdlib.",
       "category": "security"
     }
