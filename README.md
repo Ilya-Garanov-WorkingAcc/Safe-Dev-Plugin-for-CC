@@ -54,24 +54,115 @@ heartbeat. Хуки продолжают работать даже при `--dan
 
 ## Установка
 
+Установка состоит из двух независимых шагов: подготовка окружения
+(`deploy/install.sh`, один раз на машину) и регистрация плагина в Claude Code
+(`/plugin`, отдельно для каждой области видимости — см. ниже). Второй шаг
+`install.sh` не выполняет сам, только печатает инструкцию.
+
+### Шаг 1. Подготовка окружения (один раз на машину)
+
 ```bash
 git clone https://github.com/Ilya-Garanov-WorkingAcc/Safe-Dev-Plugin-for-CC.git ~/secure-dev
 cd ~/secure-dev && git checkout dev2.0
 bash deploy/install.sh
 ```
 
-Затем в Claude Code:
+Что делает установщик:
+
+- проверяет платформу (WSL — только предупреждение, не блокирует) и наличие `python3`;
+- линкует CLI: `~/.local/bin/secure-dev → ~/secure-dev/bin/secure-dev`;
+- доливает (не перезаписывает) рекомендуемые правила `permissions.deny`/`ask`
+  из `deploy/settings.template.json` в `~/.claude/settings.json`, с резервной
+  копией `settings.json.bak-<timestamp>`;
+- добавляет в `~/.bashrc` обёртку `claude()` с pre-flight-проверкой
+  (`secure-dev scan`) незнакомых репозиториев.
+
+Этот шаг не ставит сам плагин — только CLI и Слой 0. Без него `/secure-dev:trust`
+и остальные slash-команды не найдут `secure-dev` в `PATH`, а конвейер хуков
+(Слой 1) при этом установится и будет работать сам по себе.
+
+### Шаг 2. Регистрация marketplace (один раз на машину)
 
 ```
 /plugin marketplace add ~/secure-dev
+```
+
+Источником может быть локальный путь (как выше — удобно при разработке, сразу
+подхватывает несохранённые правки), GitHub-репозиторий
+(`/plugin marketplace add Ilya-Garanov-WorkingAcc/Safe-Dev-Plugin-for-CC`) или
+прямой Git URL. Имя, под которым marketplace появится в `/plugin install
+<plugin>@<marketplace>`, берётся из `.claude-plugin/marketplace.json` — в этом
+репозитории это `secure-dev-marketplace`, регистрация происходит один раз
+независимо от того, в скольких проектах и с какой областью видимости плагин
+потом ставится.
+
+### Шаг 3. Установка плагина — выбор области видимости
+
+Claude Code различает три области видимости, каждая пишется в свой файл
+настроек:
+
+| Область | Кому видно | Куда пишется | Флаг CLI |
+|---|---|---|---|
+| **user** | во всех проектах на машине | `~/.claude/settings.json` → `enabledPlugins` | `--scope user` (по умолчанию) |
+| **project** | всем, кто клонирует репозиторий (коммитится в git) | `<repo>/.claude/settings.json` → `enabledPlugins` | `--scope project` |
+| **local** | только вам, только в этом репозитории (не коммитится) | `<repo>/.claude/settings.local.json` → `enabledPlugins` | `--scope local` |
+
+**Вариант А — интерактивно, через `/plugin`:**
+
+```
 /plugin install secure-dev@secure-dev-marketplace
 ```
 
-Проверка: `secure-dev doctor`.
+Откроется выбор области видимости (user / project / local) — выбираете нужную
+стрелками, `Enter` подтверждает. Повторный вызов с другой областью добавляет
+ещё одну запись, не заменяя предыдущую.
 
-Установщик ставит CLI в `~/.local/bin`, доливает рекомендуемые правила в
-`~/.claude/settings.json` (с резервной копией существующего) и добавляет в
-`~/.bashrc` обёртку с pre-flight-проверкой незнакомых репозиториев.
+**Вариант Б — неинтерактивно, через shell (удобно для скриптов и CI):**
+
+```bash
+# Включить сразу для всех текущих и будущих проектов на машине:
+claude plugin install secure-dev@secure-dev-marketplace --scope user
+
+# Включить только для конкретного проекта, с фиксацией в git
+# (команда должна быть выполнена с cwd внутри этого репозитория):
+cd ~/projects/my-project
+claude plugin install secure-dev@secure-dev-marketplace --scope project
+
+# Включить только для себя в этом репозитории, без коммита в git:
+cd ~/projects/my-project
+claude plugin install secure-dev@secure-dev-marketplace --scope local
+```
+
+#### Если плагин нужен во всех проектах
+
+Один раз выполните установку с `--scope user` (или выберите **user** в
+интерактивном выборе). Дальше плагин активен в любом каталоге, где запускается
+`claude`, — повторять на каждый проект не нужно.
+
+#### Если плагин нужен только в конкретном(ых) проекте(ах)
+
+Установка выполняется отдельно **в каждом** таком проекте (`--scope project`
+или `--scope local`, в зависимости от того, нужно ли закоммитить решение для
+остальной команды). В остальных проектах на машине плагин просто не появится в
+`enabledPlugins` и не активируется.
+
+### Проверка после установки
+
+```
+secure-dev doctor
+```
+
+Показывает: платформа (WSL), версия `python3`, доступ к
+`CLAUDE_PLUGIN_DATA`, валидность и печать `policy.json`, число загруженных
+правил, применён ли `settings.template.json`.
+
+### Полное удаление
+
+Обратная последовательность: `/plugin uninstall secure-dev@secure-dev-marketplace
+--scope <та же область>` (или через интерактивный `/plugin` → Installed),
+затем `/plugin marketplace remove secure-dev-marketplace`, и вручную —
+symlink `~/.local/bin/secure-dev` и блок с меткой `secure-dev` в `~/.bashrc`,
+если ставился Шаг 1.
 
 ---
 
