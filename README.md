@@ -63,7 +63,7 @@ heartbeat. Хуки продолжают работать даже при `--dan
 
 ```bash
 git clone https://github.com/Ilya-Garanov-WorkingAcc/Safe-Dev-Plugin-for-CC.git ~/secure-dev
-cd ~/secure-dev && git checkout dev2.0
+cd ~/secure-dev
 bash deploy/install.sh
 ```
 
