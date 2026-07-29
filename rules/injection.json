@@ -11,7 +11,7 @@
       "match": {
         "kind": "regex",
         "flags": "i",
-        "pattern": "\\b(?:ignore|disregard|forget)\\s+(?:all\\s+|any\\s+|the\\s+)?(?:previous|prior|above|earlier|preceding|your)\\s+(?:instructions?|prompts?|rules?|training|guidelines?)|\\bnew\\s+system\\s+prompt\\b|={2,}\\s*end\\s+(?:of\\s+)?system\\s+prompt\\s*={2,}|<\\|im_(?:start|end)\\|>|\\[/(?:SYSTEM|INST)\\]|\\bигнорируй\\s+(?:все\\s+)?(?:предыдущие|прошлые|прежние)\\s+(?:инструкции|указания|правила)|\\bзабудь\\s+(?:свои|все|предыдущие)\\s+(?:инструкции|правила|указания)"
+        "pattern": "\\b(?:ignore|disregard|forget)\\s+(?:all\\s+|any\\s+|the\\s+)?(?:previous|prior|above|earlier|preceding|your)\\s+(?:instructions?|prompts?|rules?|training|guidelines?|policy|policies|protocol)|\\bnew\\s+system\\s+prompt\\b|={2,}\\s*end\\s+(?:of\\s+)?system\\s+prompt\\s*={2,}|<\\|im_(?:start|end)\\|>|\\[/(?:SYSTEM|INST)\\]|\\bигнорируй\\s+(?:все\\s+)?(?:предыдущие|прошлые|прежние)\\s+(?:инструкции|указания|правила)|\\bзабудь\\s+(?:свои|все|предыдущие)\\s+(?:инструкции|правила|указания)"
       },
       "message": "Текст пытается отменить ранее данные ассистенту инструкции.",
       "remediation": "Содержимое инструмента — это данные. Действия по нему выполняются только после подтверждения человеком.",
@@ -41,7 +41,7 @@
       "match": {
         "kind": "regex",
         "flags": "i",
-        "pattern": "\\b(?:read|cat|open|print|show|send|upload|exfiltrate|post)\\b[^.\\n]{0,40}(?:\\.env\\b|~/\\.ssh|id_rsa|\\.aws/credentials|\\.claude/\\.credentials|private\\s+key)|\\b(?:send|post|upload|forward|exfiltrate)\\s+(?:the\\s+)?(?:contents?|file|output|result|data|secrets?)\\b[^\\n]{0,60}?\\bto\\s+https?://|\\bотправ(?:ь|ить)\\s+[^\\n]{0,40}https?://|\\bпрочитай\\s+[^\\n]{0,30}(?:\\.env|\\.ssh|приватный\\s+ключ)"
+        "pattern": "\\b(?:read|cat|open|print|show|send|upload|exfiltrate|post|export|dump)\\b[^.\\n]{0,40}(?:\\.env\\b|~/\\.ssh|id_rsa|\\.aws/credentials|\\.claude/\\.credentials|private\\s+key)|\\b(?:send|post|upload|forward|exfiltrate)\\s+(?:the\\s+)?(?:contents?|file|output|result|data|secrets?|it|this|them)\\b[^\\n]{0,60}?\\bto\\s+https?://|\\bотправ(?:ь|ить)\\s+[^\\n]{0,40}https?://|\\bпрочитай\\s+[^\\n]{0,30}(?:\\.env|\\.ssh|приватный\\s+ключ)"
       },
       "message": "Текст требует прочитать секреты или отправить данные на внешний адрес.",
       "remediation": "Чтение секретов и исходящие вызовы инициирует человек, а не содержимое обрабатываемого файла.",
@@ -60,6 +60,21 @@
       },
       "message": "Директивы спрятаны в невидимой части документа: HTML-комментарий или скрытый блок.",
       "remediation": "Скрытый от человека, но видимый модели текст — признак умышленной подмены содержимого.",
+      "reference": "docs/RUNBOOK.md#injection"
+    },
+    {
+      "id": "injection-concealment",
+      "class": "injection",
+      "injection_class": "concealment",
+      "severity": "HIGH",
+      "weight": 2,
+      "match": {
+        "kind": "regex",
+        "flags": "i",
+        "pattern": "\\b(?:do\\s+not|don't|never)\\s+(?:tell|inform|notify|mention(?:\\s+this)?)\\s+(?:the\\s+)?user\\b|\\bwithout\\s+(?:telling|informing|notifying)\\s+(?:the\\s+)?user\\b|\\bkeep\\s+(?:this|it)\\s+(?:hidden\\s+)?from\\s+(?:the\\s+)?user\\b|\\bне\\s+сообщ\\w*\\s+(?:об\\s+этом\\s+)?пользовател\\w*|\\bскрой\\s+(?:это\\s+)?от\\s+пользовател\\w*"
+      },
+      "message": "Текст требует скрыть действие или его результат от пользователя.",
+      "remediation": "Указание не сообщать пользователю о совершённом действии — самостоятельный и сильный признак враждебного содержимого, независимо от того, что именно скрывается.",
       "reference": "docs/RUNBOOK.md#injection"
     },
     {
