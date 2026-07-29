@@ -71,7 +71,7 @@
       "match": {
         "kind": "regex",
         "flags": "i",
-        "pattern": "\\b(?:do\\s+not|don't|never)\\s+(?:tell|inform|notify|mention(?:\\s+this)?)\\s+(?:the\\s+)?user\\b|\\bwithout\\s+(?:telling|informing|notifying)\\s+(?:the\\s+)?user\\b|\\bkeep\\s+(?:this|it)\\s+(?:hidden\\s+)?from\\s+(?:the\\s+)?user\\b|\\bне\\s+сообщ\\w*\\s+(?:об\\s+этом\\s+)?пользовател\\w*|\\bскрой\\s+(?:это\\s+)?от\\s+пользовател\\w*"
+        "pattern": "\\b(?:do\\s+not|don't|never)\\s+(?:tell|inform|notify|mention)\\b[^.\\n]{0,30}\\buser\\b|\\bwithout\\s+(?:telling|informing|notifying)\\s+(?:the\\s+)?user\\b|\\bkeep\\s+(?:this|it)\\s+(?:hidden\\s+)?from\\s+(?:the\\s+)?user\\b|\\bне\\s+(?:сообщ|упомина)\\w*\\s+(?:об\\s+этом\\s+)?пользовател\\w*|\\bскрой\\s+(?:это\\s+)?от\\s+пользовател\\w*"
       },
       "message": "Текст требует скрыть действие или его результат от пользователя.",
       "remediation": "Указание не сообщать пользователю о совершённом действии — самостоятельный и сильный признак враждебного содержимого, независимо от того, что именно скрывается.",
