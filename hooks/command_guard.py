@@ -26,6 +26,7 @@ MAX_AUDIT_RECORDS = 8
 ESCALATING_WARNINGS = {
     "argv0_is_variable", "argv0_from_substitution", "interpreter_exec",
     "max_depth_exceeded", "too_many_commands", "recursion_limit",
+    "source_unresolved", "shell_c_unresolved",
 }
 
 _ROOT_LITERALS = {"/", "/.", "/*", "/**", "~", "~/", "~/*", "$HOME", "${HOME}",
@@ -184,19 +185,26 @@ def main():
 
     # Команда не разобрана: пропускать её нельзя, но и блокировать баг парсера
     # тоже нельзя — решение отдаётся человеку (ARCHITECTURE §4.1).
+    #
+    # ВАЖНО: этот gate раньше срабатывал только при config.level()=="strict",
+    # то есть на дефолтном уровне "audit" неразобранная команда (например,
+    # `RM=rm; $RM -rf /`, дающая предупреждение argv0_is_variable) проходила
+    # молча — fail-closed был объявлен, но не действовал ни разу вне strict.
+    # Эскалация не зависит от уровня политики: сам факт «статически неизвестно,
+    # что выполнится» — это про парсер, а не про то, насколько строго сейчас
+    # настроен плагин.
     unresolved = [w for w in warnings
                   if w in ESCALATING_WARNINGS or w.startswith("parse_error")]
     if unresolved and (best is None or best["decision"] in (policy.LOG, policy.WARN)):
-        if config.level() == "strict":
-            audit.write({
-                "hook": HOOK, "rule": "PARSER_UNRESOLVED", "class": "internal",
-                "severity": "MEDIUM", "level": "strict", "action": "asked",
-                "target": None, "evidence": command,
-                "latency_ms": hookio.elapsed_ms(),
-            }, data)
-            hookio.ask("PreToolUse",
-                       "secure-dev: команда собирается динамически, статически "
-                       "проверить её невозможно. Подтвердите, если она ожидаема.")
+        audit.write({
+            "hook": HOOK, "rule": "PARSER_UNRESOLVED", "class": "internal",
+            "severity": "MEDIUM", "level": config.level(), "action": "asked",
+            "target": None, "evidence": command,
+            "latency_ms": hookio.elapsed_ms(),
+        }, data)
+        hookio.ask("PreToolUse",
+                   "secure-dev: команда собирается динамически, статически "
+                   "проверить её невозможно. Подтвердите, если она ожидаема.")
 
     if best is None or best["exempt"] is not None or best["suppressed"]:
         hookio.passthrough()

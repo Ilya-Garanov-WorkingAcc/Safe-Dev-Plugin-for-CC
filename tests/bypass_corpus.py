@@ -358,4 +358,24 @@ LEGITIMATE = [
     "env | grep NODE",
 ]
 
-ALL_BLOCKING = RM_ROOT + SUDO + DESTRUCTIVE + GIT_DESTRUCTIVE
+# --- Обходы, найденные прожаркой AGGG (2026-08-03) -------------------------
+# Конструкции, которые парсер не разворачивал: eval, source/., trap, alias,
+# function, ANSI-C кавычки, process substitution, xargs -I, exec -a, find
+# -exec. 07-Эталон-обходов.json — краткий список, здесь — точные команды.
+PARSER_GAPS = [
+    ("eval",                   "eval 'rm -rf /'"),
+    ("source из here-string",  ". /dev/stdin <<< 'rm -rf /'"),
+    ("trap",                   "bash -c 'trap \"rm -rf /\" EXIT'"),
+    ("alias",                  "bash -c 'alias r=\"rm -rf\"; r /'"),
+    ("function",               "bash -c 'f(){ rm -rf /; }; f'"),
+    ("ANSI-C кавычки",         "rm -rf $'\\x2f'"),
+    ("process substitution",   "rm -rf <(echo /)"),
+    ("xargs -I",               "echo / | xargs -I{} rm -rf {}"),
+    ("exec -a",                "exec -a safe rm -rf /"),
+    ("find -exec",             "find / -exec rm -rf {} \\;"),
+    ("xargs -d + sh -c",       "echo 'rm -rf /' | xargs -d '\\n' sh -c"),
+    ("at из пайпа",            "echo 'rm -rf /' | at now"),
+    ("crontab из пайпа",       "echo '* * * * * rm -rf /' | crontab -"),
+]
+
+ALL_BLOCKING = RM_ROOT + SUDO + DESTRUCTIVE + GIT_DESTRUCTIVE + PARSER_GAPS

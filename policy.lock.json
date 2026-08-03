@@ -1,6 +1,5 @@
 {
-  "policy_sha256": "ff13563b8cae5404600c08ea52cc343f6925187265fae73034b7deb754d47dce",
-  "policy_version": "2026.07-pilot",
-  "plugin_version": "2.0.1",
-  "sealed_at": "2026-07-29T00:00:00+03:00"
+  "policy_sha256": "791ed48ee27d227e6da70c0b4c575b88dc967fa7851dc5e4d8381db50441c0f1",
+  "policy_version": "2026.08-p0-fix",
+  "plugin_version": "2.0.1"
 }
