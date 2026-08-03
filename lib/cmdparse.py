@@ -44,7 +44,8 @@ WRAPPERS = {
             "skip_assignments": True},
     "command": {"value_flags": set()},
     "builtin": {"value_flags": set()},
-    "exec": {"value_flags": set()},
+    "exec": {"value_flags": {"-a"}},
+    "coproc": {"value_flags": set()},
     "nohup": {"value_flags": set()},
     "setsid": {"value_flags": set()},
     "stdbuf": {"value_flags": {"-i", "-o", "-e"}},
@@ -212,6 +213,23 @@ def _tokenize(text):
             start().subs.append(inner)
             continue
 
+        if ch == "$" and i + 1 < n and text[i + 1] == "'":
+            j, decoded = _scan_ansi_c(text, i + 2)
+            w = start()
+            w.text += decoded
+            w.quoted = True
+            i = j
+            continue
+
+        if ch in "<>" and i + 1 < n and text[i + 1] == "(":
+            # Process substitution `<(...)`/`>(...)`: как и $( ), содержимое —
+            # отдельная команда; итоговое слово помечается тем же маркером
+            # `$()`, что и обычная подстановка (см. _render) — цель становится
+            # динамической для правил вроде command-rm-dynamic-target.
+            inner, i = _scan_balanced(text, i + 2, "(", ")")
+            start().subs.append(inner)
+            continue
+
         if ch == "`":
             j = _find_unescaped(text, i + 1, "`")
             start().subs.append(text[i + 1:j])
@@ -324,6 +342,29 @@ def _scan_balanced(text, i, open_ch, close_ch):
     return text[start:], n
 
 
+def _scan_ansi_c(text, i):
+    """Содержимое ANSI-C кавычек `$'...'` — с раскрытием escape-последовательностей.
+
+    `$'\\x2f'` должно дать тот же символ, что и `/`, иначе `rm -rf $'\\x2f'`
+    обходит проверку корня одним экранированием (ADR-002).
+    """
+    n = len(text)
+    j = i
+    while j < n:
+        if text[j] == "\\" and j + 1 < n:
+            j += 2
+            continue
+        if text[j] == "'":
+            break
+        j += 1
+    raw = text[i:j]
+    try:
+        decoded = raw.encode("utf-8", "surrogateescape").decode("unicode_escape")
+    except Exception:
+        decoded = raw
+    return (j + 1 if j < n else n), decoded
+
+
 def _find_unescaped(text, i, target):
     n = len(text)
     while i < n:
@@ -346,14 +387,37 @@ def parse(command):
     """
     if not isinstance(command, str) or not command.strip():
         return [], []
-    state = {"warnings": []}
+    state = {"warnings": [], "aliases": {}}
     try:
         cmds = _parse_text(command, 0, DIRECT, state)
+        cmds.extend(_expand_function_bodies(command, state))
     except RecursionError:
         return [], ["recursion_limit"]
     except Exception as exc:                     # инвариант: парсер не падает
         return [], ["parse_error:{}".format(type(exc).__name__)]
     return cmds, state["warnings"]
+
+
+# `name () { body }` и `function name { body }` (TS.md §7.2). Тело разбирается
+# по тексту команды целиком, а не по дереву вызовов: токенайзер трактует
+# голые `(` `)` как разделители конструкций (ADR-002 §fork-bomb), и попытка
+# провести определение функции через обычный `_build` даёт мусор. Само тело —
+# опасная команда внутри — обязано попасть в результат независимо от того,
+# вызывается ли функция дальше в той же строке: не вызванное определение не
+# опаснее вызванного, если проверка вообще пропускает его мимо правил.
+FUNC_DEF_RE = re.compile(
+    r"(?:function\s+[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\))"
+    r"\s*\{([^{}]*)\}",
+    re.DOTALL)
+
+
+def _expand_function_bodies(command, state):
+    out = []
+    for match in FUNC_DEF_RE.finditer(command):
+        body = match.group(1)
+        if body.strip():
+            out.extend(_parse_text(body, 1, SUBSHELL, state))
+    return out
 
 
 def _parse_text(text, depth, origin, state):
@@ -421,12 +485,27 @@ def _build(words, depth, origin, position, pipeline_index, state):
     """Список слов одной стадии → (Cmd, [дополнительные Cmd])."""
     words, redirects = _strip_redirects(words)
     assignments, words = _strip_assignments(words)
+    words = _strip_reserved_prefix(words)
     if not words:
         return None
     head, rest = words[0], words[1:]
 
     argv0, var_argv0, extra = _resolve_argv0(head, depth, origin, state)
     args = tuple(_render(w) for w in rest)
+
+    # Алиас, определённый раньше в этой же команде: `alias r="rm -rf"; r /`
+    # (TS.md §7.2). Раскрывается тем же способом, что и eval — подстановкой
+    # значения и повторным разбором; глубина растёт, чтобы самоссылающийся
+    # алиас (`alias r=r`) уткнулся в MAX_DEPTH, а не зациклился.
+    aliases = state.setdefault("aliases", {})
+    if argv0 in aliases and depth < MAX_DEPTH:
+        expanded_line = aliases[argv0] + "".join(" " + _quote(a) for a in args)
+        parsed = _parse_text(expanded_line, depth + 1, origin, state)
+        if not parsed:
+            return None
+        new_head, new_extra = parsed[0], list(parsed[1:])
+        return new_head, new_extra + extra
+
     raw = " ".join([argv0] + list(args))
 
     flags, operands = _split_flags(argv0, args)
@@ -434,6 +513,12 @@ def _build(words, depth, origin, position, pipeline_index, state):
               depth=depth, origin=origin, raw=raw, pipeline=pipeline_index,
               position=position, redirects=tuple(redirects),
               assignments=tuple(assignments), var_argv0=var_argv0)
+
+    if argv0 == "alias":
+        for arg in args:
+            m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", arg)
+            if m:
+                aliases[m.group(1)] = m.group(2)
 
     # Подстановки внутри аргументов — отдельные команды глубже уровнем.
     for word in words:
@@ -475,6 +560,23 @@ def _strip_assignments(words):
             continue
         break
     return assignments, words[i:]
+
+
+# Служебные слова shell, за которыми следует НОВАЯ команда, а не её аргумент
+# (найдено охотой за обходами сверх P0-корпуса, 2026-08). Токенайзер режет
+# только по `;`/`&&`/`||`/`|` — стадия `do rm -rf /` после `until false; do
+# rm -rf /; done` парсится как команда с argv0="do", а `rm -rf /` тонет в её
+# args. `if`/`while`/`until`/`for`/`case` сюда не входят: они вводят не
+# команду, а условие/список, и без полного грамматического разбора шелла
+# срезать их так же нельзя, не потеряв реальные операнды.
+RESERVED_PREFIX = {"do", "then", "else", "elif", "time"}
+
+
+def _strip_reserved_prefix(words):
+    while words and not words[0].quoted and not words[0].subs \
+            and words[0].text in RESERVED_PREFIX:
+        words = words[1:]
+    return words
 
 
 def _render(word):
@@ -578,9 +680,66 @@ def _looks_negative_number(arg):
     return bool(re.match(r"^-\d+$", arg))
 
 
+SOURCE_DYNAMIC_RE = re.compile(r"^/(dev/std(in|out)|dev/fd/|proc/self/fd/)")
+
+
 def _expand(cmd, args, depth, state):
     """Раскрытие обёрток, шеллов и интерпретаторов."""
     out = []
+
+    if cmd.argv0 == "xargs":
+        # `-I{}` даёт цель, вычисляемую из потока: статически известен только
+        # плейсхолдер, не значение (TS.md §7.2). Помечаем его тем же
+        # маркером `$()`, что и обычная подстановка — правило
+        # command-rm-dynamic-target реагирует одинаково на обе формы.
+        inner_argv = _unwrap(cmd.argv0, args)
+        repl = _xargs_replacement(args)
+        if inner_argv:
+            line = " ".join(_quote(a) for a in inner_argv)
+            if repl:
+                line = line.replace(repl, repl + "$()")
+            out.extend(_parse_text(line, depth, cmd.origin, state))
+        return out
+
+    if cmd.argv0 in ("eval",):
+        # `eval 'rm -rf /'` — строка-аргумент исполняется как код (TS.md §7.2,
+        # обход из корпуса bypass_corpus). Склеиваем аргументы тем же способом,
+        # каким это делает сам bash: пробелом.
+        code = " ".join(args)
+        if code.strip():
+            out.extend(_parse_text(code, depth + 1, SUBSHELL, state))
+
+    if cmd.argv0 in ("source", "."):
+        # `source .venv/bin/activate` — обычное дело в любом Python-проекте;
+        # эскалация по каждому такому вызову была бы ложным срабатыванием на
+        # львиной доле легитимных команд. Опасен не source сам по себе, а
+        # source из НЕИЗВЕСТНОГО источника: here-string (`<<<`, содержимое
+        # доступно через cmd.redirects), явный /dev/stdin или /dev/fd, либо
+        # цель, вычисленная подстановкой (маркер `$()` — см. _render).
+        here_string = cmd.redirects[0] if cmd.redirects else None
+        if here_string:
+            out.extend(_parse_text(here_string, depth + 1, SUBSHELL, state))
+        else:
+            target = args[0] if args else None
+            if not target or "$()" in target or SOURCE_DYNAMIC_RE.match(target):
+                state["warnings"].append("source_unresolved")
+
+    if cmd.argv0 == "trap" and args and not args[0].startswith("-"):
+        # `trap "rm -rf /" EXIT` — первый операнд обычно код, выполняемый по
+        # сигналу (TS.md §7.2).
+        out.extend(_parse_text(args[0], depth + 1, SUBSHELL, state))
+
+    if cmd.argv0 == "find" and "--exec" in cmd.flags:
+        exec_cmd = _find_exec_command(args)
+        if exec_cmd:
+            # `{}` — цель, которую find подставляет для каждого найденного
+            # файла: статически известен только плейсхолдер (как `-I{}` у
+            # xargs), не то, что реально будет удалено. Тот же маркер `$()`,
+            # что и у обычной подстановки.
+            line = " ".join(_quote(a) for a in exec_cmd)
+            if "{}" in exec_cmd:
+                line = line.replace("{}", "{}$()")
+            out.extend(_parse_text(line, depth + 1, cmd.origin, state))
 
     inner_argv = _unwrap(cmd.argv0, args)
     if inner_argv:
@@ -591,6 +750,11 @@ def _expand(cmd, args, depth, state):
         code = _flag_value(args, ("-c",))
         if code:
             out.extend(_parse_text(code, depth + 1, SUBSHELL, state))
+        elif "-c" in cmd.flags:
+            # `-c` присутствует, но значение статически недоступно — обычно
+            # потому, что оно приходит от xargs/пайпа
+            # (`... | xargs -d '\n' sh -c`). Пропускать нельзя (TS.md §7.1).
+            state["warnings"].append("shell_c_unresolved")
 
     if cmd.argv0 in INTERPRETERS:
         code = _flag_value(args, ("-c", "-e", "-E", "--eval", "--print"))
@@ -604,6 +768,29 @@ def _expand(cmd, args, depth, state):
             for literal in _literals(code):
                 out.extend(_parse_text(literal, depth + 1, INTERPRETER, state))
     return out
+
+
+def _xargs_replacement(args):
+    """Значение `-I` — как отдельным аргументом, так и слитно `-I{}`."""
+    for i, arg in enumerate(args):
+        if arg == "-I" and i + 1 < len(args):
+            return args[i + 1]
+        if arg.startswith("-I") and len(arg) > 2:
+            return arg[2:]
+    return None
+
+
+def _find_exec_command(args):
+    """Команда внутри `find ... -exec CMD {} ;` (TS.md §7.2)."""
+    for i, arg in enumerate(args):
+        if arg in ("-exec", "-execdir"):
+            parts = []
+            for later in args[i + 1:]:
+                if later in (";", "+"):
+                    break
+                parts.append(later)
+            return parts or None
+    return None
 
 
 def _unwrap(argv0, args):

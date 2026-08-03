@@ -176,6 +176,69 @@ for label, command in bypass_corpus.SUDO:
 check("sudo-корпус: каждая строка даёт sudo либо предупреждение", not missed,
       str(missed[:3]))
 
+print("=== D2: обходы прожарки AGGG — eval/source/trap/alias/function/... ===")
+
+DANGEROUS_ARGV0 = {"rm", "sudo", "doas", "pkexec", "at", "crontab", "sh", "bash",
+                   "unknown"}
+missed = []
+for label, command in bypass_corpus.PARSER_GAPS:
+    cmds, warns = cp.parse(command)
+    seen = any(c.argv0 in DANGEROUS_ARGV0 for c in cmds)
+    if not (seen or warns):
+        missed.append((label, command))
+check("корпус прожарки: каждая строка даёт опасный argv0 либо предупреждение",
+      not missed, str(missed))
+
+check("eval раскрыт", bool(find("eval 'rm -rf /'", "rm")))
+check("source из here-string раскрыт",
+      bool(find(". /dev/stdin <<< 'rm -rf /'", "rm")))
+check("trap раскрыт", bool(find('bash -c \'trap "rm -rf /" EXIT\'', "rm")))
+check("alias раскрыт", bool(find("bash -c 'alias r=\"rm -rf\"; r /'", "rm")))
+check("function раскрыт", bool(find("bash -c 'f(){ rm -rf /; }; f'", "rm")))
+
+cmds, _ = cp.parse("rm -rf $'\\x2f'")
+rm = find("rm -rf $'\\x2f'", "rm")
+check("ANSI-C decoded в root-таргет",
+      bool(rm) and rm[0].operands == ("/",), str(rm[0].operands) if rm else "нет rm")
+
+cmds, _ = cp.parse("rm -rf <(echo /)")
+rm = find("rm -rf <(echo /)", "rm")
+check("process substitution помечен динамическим",
+      bool(rm) and any("$()" in op for op in rm[0].operands),
+      str(rm[0].operands) if rm else "нет rm")
+
+cmds, _ = cp.parse("echo / | xargs -I{} rm -rf {}")
+rm = [c for c in cmds if c.argv0 == "rm"]
+check("xargs -I{} помечен динамическим",
+      bool(rm) and any("$()" in op for op in rm[0].operands),
+      str(rm[0].operands) if rm else "нет rm")
+
+check("exec -a раскрывает цель, а не значение флага",
+      bool(find("exec -a safe rm -rf /", "rm")))
+
+check("find -exec раскрыт", bool(find("find / -exec rm -rf {} \\;", "rm")))
+
+cmds, warns = cp.parse("echo 'rm -rf /' | xargs -d '\\n' sh -c")
+check("xargs -d + sh -c без кода → предупреждение",
+      "shell_c_unresolved" in warns, str(warns))
+
+print("=== D3: обходы, найденные во втором раунде охоты ===")
+
+missed = []
+for label, command in bypass_corpus.NEW_GAPS:
+    cmds, warns = cp.parse(command)
+    seen = any(c.argv0 in DANGEROUS_ARGV0 for c in cmds)
+    if not (seen or warns):
+        missed.append((label, command))
+check("раунд 2: каждая строка даёт опасный argv0 либо предупреждение",
+      not missed, str(missed))
+
+check("until/do — do не глотает следующую команду",
+      bool(find("until false; do rm -rf /; break; done", "rm")))
+check("вложенный if внутри function — then не глотает команду",
+      bool(find("bash -c 'f(){ if true; then rm -rf /; fi; }; f'", "rm")))
+check("coproc раскрыт", bool(find("coproc bash -c 'rm -rf /'", "rm")))
+
 print("=== E: бюджет (TS.md §1.3) ===")
 sample = "git status && npm run build | tee /tmp/log ; docker compose up -d"
 t0 = time.time()
