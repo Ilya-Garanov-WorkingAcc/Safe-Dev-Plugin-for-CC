@@ -45,6 +45,7 @@ WRAPPERS = {
     "command": {"value_flags": set()},
     "builtin": {"value_flags": set()},
     "exec": {"value_flags": {"-a"}},
+    "coproc": {"value_flags": set()},
     "nohup": {"value_flags": set()},
     "setsid": {"value_flags": set()},
     "stdbuf": {"value_flags": {"-i", "-o", "-e"}},
@@ -484,6 +485,7 @@ def _build(words, depth, origin, position, pipeline_index, state):
     """Список слов одной стадии → (Cmd, [дополнительные Cmd])."""
     words, redirects = _strip_redirects(words)
     assignments, words = _strip_assignments(words)
+    words = _strip_reserved_prefix(words)
     if not words:
         return None
     head, rest = words[0], words[1:]
@@ -558,6 +560,23 @@ def _strip_assignments(words):
             continue
         break
     return assignments, words[i:]
+
+
+# Служебные слова shell, за которыми следует НОВАЯ команда, а не её аргумент
+# (найдено охотой за обходами сверх P0-корпуса, 2026-08). Токенайзер режет
+# только по `;`/`&&`/`||`/`|` — стадия `do rm -rf /` после `until false; do
+# rm -rf /; done` парсится как команда с argv0="do", а `rm -rf /` тонет в её
+# args. `if`/`while`/`until`/`for`/`case` сюда не входят: они вводят не
+# команду, а условие/список, и без полного грамматического разбора шелла
+# срезать их так же нельзя, не потеряв реальные операнды.
+RESERVED_PREFIX = {"do", "then", "else", "elif", "time"}
+
+
+def _strip_reserved_prefix(words):
+    while words and not words[0].quoted and not words[0].subs \
+            and words[0].text in RESERVED_PREFIX:
+        words = words[1:]
+    return words
 
 
 def _render(word):

@@ -222,6 +222,23 @@ cmds, warns = cp.parse("echo 'rm -rf /' | xargs -d '\\n' sh -c")
 check("xargs -d + sh -c без кода → предупреждение",
       "shell_c_unresolved" in warns, str(warns))
 
+print("=== D3: обходы, найденные во втором раунде охоты ===")
+
+missed = []
+for label, command in bypass_corpus.NEW_GAPS:
+    cmds, warns = cp.parse(command)
+    seen = any(c.argv0 in DANGEROUS_ARGV0 for c in cmds)
+    if not (seen or warns):
+        missed.append((label, command))
+check("раунд 2: каждая строка даёт опасный argv0 либо предупреждение",
+      not missed, str(missed))
+
+check("until/do — do не глотает следующую команду",
+      bool(find("until false; do rm -rf /; break; done", "rm")))
+check("вложенный if внутри function — then не глотает команду",
+      bool(find("bash -c 'f(){ if true; then rm -rf /; fi; }; f'", "rm")))
+check("coproc раскрыт", bool(find("coproc bash -c 'rm -rf /'", "rm")))
+
 print("=== E: бюджет (TS.md §1.3) ===")
 sample = "git status && npm run build | tee /tmp/log ; docker compose up -d"
 t0 = time.time()

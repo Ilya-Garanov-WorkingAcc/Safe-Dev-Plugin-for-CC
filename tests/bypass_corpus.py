@@ -378,4 +378,25 @@ PARSER_GAPS = [
     ("crontab из пайпа",       "echo '* * * * * rm -rf /' | crontab -"),
 ]
 
-ALL_BLOCKING = RM_ROOT + SUDO + DESTRUCTIVE + GIT_DESTRUCTIVE + PARSER_GAPS
+# --- Обходы, найденные при поиске сверх P0-корпуса (2026-08-03, раунд 2) ---
+# Общий корень первых двух: служебные слова shell (do/then/else/elif) не
+# распознавались, следующая за ними реальная команда тонула в их "аргументах".
+NEW_GAPS = [
+    ("until/do + rm",          "until false; do rm -rf /; break; done"),
+    ("вложенный if внутри f()", "bash -c 'f(){ if true; then rm -rf /; fi; }; f'"),
+    ("C-style for + eval",     "for ((i=0;i<1;i++)); do eval 'rm -rf /'; done"),
+    ("coproc",                 "coproc bash -c 'rm -rf /'"),
+    ("printf в шелл",          "printf 'rm -rf /' | sh"),
+]
+
+# Проверены, НЕ являются реальным обходом (документируется, не чинится):
+# null-byte и zero-width space дают argv0, которого не существует как
+# исполняемого файла — статическая проверка их пропускает, но реальный bash
+# получит "command not found", а не rm. Не входят в ALL_BLOCKING.
+KNOWN_NON_EXPLOITABLE = [
+    ("null byte в argv0",      "r\x00m -rf /"),
+    ("zero-width space",       "rm​ -rf /"),
+]
+
+ALL_BLOCKING = (RM_ROOT + SUDO + DESTRUCTIVE + GIT_DESTRUCTIVE + PARSER_GAPS
+                + NEW_GAPS)
