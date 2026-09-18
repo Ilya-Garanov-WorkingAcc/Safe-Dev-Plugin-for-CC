@@ -111,7 +111,8 @@
       "match": {
         "kind": "command",
         "argv0": ["sh", "bash", "zsh", "dash", "ksh"],
-        "piped_from_any": ["base64", "xxd", "uudecode", "openssl", "gunzip", "zcat"]
+        "piped_from_any": ["base64", "xxd", "uudecode", "openssl", "gunzip", "zcat",
+                          "printf", "echo"]
       },
       "message": "Декодирование данных с последующим исполнением в шелле. Единственное назначение конструкции — скрыть содержимое команды от проверки.",
       "remediation": "Раскодируйте отдельно и покажите результат: echo <данные> | base64 -d. Исполнять — только после того, как содержимое прочитано.",

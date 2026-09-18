@@ -1,20 +1,20 @@
 {
   "schema_version": 1,
-  "policy_version": "2026.07-pilot",
+  "policy_version": "2026.08-p0-fix",
 
   "level": "audit",
 
   "rule_levels": {
     "secret-egress": "strict",
     "secret-output": "strict",
-    "config-trust": "warn",
-    "privilege": "audit",
+    "config-trust": "strict",
+    "privilege": "strict",
     "command-destructive": "strict",
     "git-destructive": "strict",
-    "persistence": "audit",
-    "anti-forensics": "audit",
-    "path-sensitive": "warn",
-    "injection": "warn",
+    "persistence": "strict",
+    "anti-forensics": "strict",
+    "path-sensitive": "strict",
+    "injection": "strict",
     "platform": "warn",
     "internal": "audit"
   },

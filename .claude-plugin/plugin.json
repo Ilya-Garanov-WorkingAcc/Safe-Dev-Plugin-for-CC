@@ -1,7 +1,7 @@
 {
   "name": "secure-dev",
   "displayName": "secure-dev",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "Контроль безопасной разработки для Claude Code: целостность конфигурации клонированного репозитория, семантическая блокировка деструктивных команд, анонимизация секретов, детект косвенных prompt injection, JSONL-аудит и heartbeat. Преемник safe-development v1.x.",
   "author": {
     "name": "Ilya Garanov",

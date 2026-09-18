@@ -150,7 +150,7 @@ set_local({})
 check("приоритет id над классом",
       config.effective_level("secret-egress", "path-sensitive") == "strict")
 check("класс действует при отсутствии id",
-      config.effective_level("новое-правило", "path-sensitive") == "warn")
+      config.effective_level("новое-правило", "path-sensitive") == "strict")
 check("иначе глобальный уровень",
       config.effective_level("новое-правило", "новый-класс") == "audit")
 

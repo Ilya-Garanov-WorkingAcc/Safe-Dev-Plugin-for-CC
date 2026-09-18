@@ -358,4 +358,45 @@ LEGITIMATE = [
     "env | grep NODE",
 ]
 
-ALL_BLOCKING = RM_ROOT + SUDO + DESTRUCTIVE + GIT_DESTRUCTIVE
+# --- Обходы, найденные прожаркой AGGG (2026-08-03) -------------------------
+# Конструкции, которые парсер не разворачивал: eval, source/., trap, alias,
+# function, ANSI-C кавычки, process substitution, xargs -I, exec -a, find
+# -exec. 07-Эталон-обходов.json — краткий список, здесь — точные команды.
+PARSER_GAPS = [
+    ("eval",                   "eval 'rm -rf /'"),
+    ("source из here-string",  ". /dev/stdin <<< 'rm -rf /'"),
+    ("trap",                   "bash -c 'trap \"rm -rf /\" EXIT'"),
+    ("alias",                  "bash -c 'alias r=\"rm -rf\"; r /'"),
+    ("function",               "bash -c 'f(){ rm -rf /; }; f'"),
+    ("ANSI-C кавычки",         "rm -rf $'\\x2f'"),
+    ("process substitution",   "rm -rf <(echo /)"),
+    ("xargs -I",               "echo / | xargs -I{} rm -rf {}"),
+    ("exec -a",                "exec -a safe rm -rf /"),
+    ("find -exec",             "find / -exec rm -rf {} \\;"),
+    ("xargs -d + sh -c",       "echo 'rm -rf /' | xargs -d '\\n' sh -c"),
+    ("at из пайпа",            "echo 'rm -rf /' | at now"),
+    ("crontab из пайпа",       "echo '* * * * * rm -rf /' | crontab -"),
+]
+
+# --- Обходы, найденные при поиске сверх P0-корпуса (2026-08-03, раунд 2) ---
+# Общий корень первых двух: служебные слова shell (do/then/else/elif) не
+# распознавались, следующая за ними реальная команда тонула в их "аргументах".
+NEW_GAPS = [
+    ("until/do + rm",          "until false; do rm -rf /; break; done"),
+    ("вложенный if внутри f()", "bash -c 'f(){ if true; then rm -rf /; fi; }; f'"),
+    ("C-style for + eval",     "for ((i=0;i<1;i++)); do eval 'rm -rf /'; done"),
+    ("coproc",                 "coproc bash -c 'rm -rf /'"),
+    ("printf в шелл",          "printf 'rm -rf /' | sh"),
+]
+
+# Проверены, НЕ являются реальным обходом (документируется, не чинится):
+# null-byte и zero-width space дают argv0, которого не существует как
+# исполняемого файла — статическая проверка их пропускает, но реальный bash
+# получит "command not found", а не rm. Не входят в ALL_BLOCKING.
+KNOWN_NON_EXPLOITABLE = [
+    ("null byte в argv0",      "r\x00m -rf /"),
+    ("zero-width space",       "rm​ -rf /"),
+]
+
+ALL_BLOCKING = (RM_ROOT + SUDO + DESTRUCTIVE + GIT_DESTRUCTIVE + PARSER_GAPS
+                + NEW_GAPS)
