@@ -329,6 +329,217 @@
       "reference": "docs/RUNBOOK.md#git-destructive"
     },
     {
+      "id": "command-rsync-delete-root",
+      "class": "command-destructive",
+      "severity": "CRITICAL",
+      "match": {
+        "kind": "command",
+        "argv0": ["rsync"],
+        "flags_any": ["--delete", "--delete-before", "--delete-during", "--delete-delay",
+                      "--delete-after", "--delete-excluded", "--delete-missing-args",
+                      "--remove-source-files"],
+        "flags_not_any": ["--dry-run", "-n"],
+        "dest_root": true
+      },
+      "message": "rsync --delete с назначением в корень, домашний каталог или каталог выше рабочего удаляет там всё, чего нет в источнике. Инцидент 18.09.2026: именно так был стёрт /home целиком.",
+      "remediation": "Назначение синхронизации — конкретный подкаталог проекта или каталог, созданный mktemp -d. Тесты деплоя гоняйте в песочнице, а не на реальных путях.",
+      "reference": "docs/RUNBOOK.md#sync-destructive"
+    },
+    {
+      "id": "command-rsync-delete-localhost",
+      "class": "command-destructive",
+      "severity": "CRITICAL",
+      "match": {
+        "kind": "command",
+        "argv0": ["rsync"],
+        "flags_any": ["--delete", "--delete-before", "--delete-during", "--delete-delay",
+                      "--delete-after", "--delete-excluded", "--delete-missing-args",
+                      "--remove-source-files"],
+        "flags_not_any": ["--dry-run", "-n"],
+        "dest_regex_any": ["^(?:[^/@:]+@)?(?:localhost|127\\.0\\.0\\.1|::1|0\\.0\\.0\\.0)::?"]
+      },
+      "message": "rsync --delete на localhost: «удалённый» путь после двоеточия — это каталог на этой же машине, а пустой путь — домашний каталог.",
+      "remediation": "Для проверки деплоя поднимите цель в mktemp -d и укажите её явно: rsync ... localhost:/tmp/deploy-XXXX/. Пустое назначение после двоеточия недопустимо.",
+      "reference": "docs/RUNBOOK.md#sync-destructive"
+    },
+    {
+      "id": "command-rsync-delete-remote",
+      "class": "command-destructive",
+      "severity": "MEDIUM",
+      "match": {
+        "kind": "command",
+        "argv0": ["rsync"],
+        "flags_any": ["--delete", "--delete-before", "--delete-during", "--delete-delay",
+                      "--delete-after", "--delete-excluded", "--delete-missing-args",
+                      "--remove-source-files"],
+        "flags_not_any": ["--dry-run", "-n"],
+        "dest_regex_any": ["^(?:[^/@:]+@)?[A-Za-z0-9._-]+::?", "^rsync://"]
+      },
+      "message": "rsync --delete на удалённый хост: что именно будет удалено на той стороне, статически не проверить.",
+      "remediation": "Сначала --dry-run с тем же назначением и просмотр списка удалений; затем реальный запуск с подтверждением человека.",
+      "reference": "docs/RUNBOOK.md#sync-destructive"
+    },
+    {
+      "id": "command-rsync-delete-dynamic",
+      "class": "command-destructive",
+      "severity": "MEDIUM",
+      "match": {
+        "kind": "command",
+        "argv0": ["rsync"],
+        "flags_any": ["--delete", "--delete-before", "--delete-during", "--delete-delay",
+                      "--delete-after", "--delete-excluded", "--delete-missing-args",
+                      "--remove-source-files"],
+        "flags_not_any": ["--dry-run", "-n"],
+        "dest_dynamic": true
+      },
+      "message": "Назначение rsync --delete вычисляется из переменной или подстановки. Пустая переменная в \"$HOME/$X/\" превращает назначение в домашний каталог.",
+      "remediation": "Подставьте путь явно либо сначала выведите его (echo \"$DST\") и убедитесь, что это подкаталог проекта; в скриптах — set -u и проверка [ -n \"$DST\" ].",
+      "reference": "docs/RUNBOOK.md#sync-destructive"
+    },
+    {
+      "id": "command-rsync-delete-outside-cwd",
+      "class": "command-destructive",
+      "severity": "MEDIUM",
+      "match": {
+        "kind": "command",
+        "argv0": ["rsync"],
+        "flags_any": ["--delete", "--delete-before", "--delete-during", "--delete-delay",
+                      "--delete-after", "--delete-excluded", "--delete-missing-args",
+                      "--remove-source-files"],
+        "flags_not_any": ["--dry-run", "-n"],
+        "dest_outside_cwd": true
+      },
+      "message": "rsync --delete в каталог за пределами рабочего: там будет удалено всё, чего нет в источнике.",
+      "remediation": "Убедитесь, что назначение — именно зеркало этого источника, и подтвердите. Для проверок используйте --dry-run.",
+      "reference": "docs/RUNBOOK.md#sync-destructive"
+    },
+    {
+      "id": "command-rsync-delete",
+      "class": "command-destructive",
+      "severity": "LOW",
+      "match": {
+        "kind": "command",
+        "argv0": ["rsync"],
+        "flags_any": ["--delete", "--delete-before", "--delete-during", "--delete-delay",
+                      "--delete-after", "--delete-excluded", "--delete-missing-args",
+                      "--remove-source-files"],
+        "flags_not_any": ["--dry-run", "-n"]
+      },
+      "message": "rsync --delete внутри проекта: в назначении будет удалено всё, чего нет в источнике.",
+      "remediation": "Если назначение не является зеркалом источника, уберите --delete.",
+      "reference": "docs/RUNBOOK.md#sync-destructive"
+    },
+    {
+      "id": "command-find-delete-root",
+      "class": "command-destructive",
+      "severity": "CRITICAL",
+      "match": {
+        "kind": "command",
+        "argv0": ["find"],
+        "flags_all": ["--delete"],
+        "target_root": true
+      },
+      "message": "find -delete от корня, домашнего каталога или каталога выше рабочего — массовое удаление по маске за пределами проекта.",
+      "remediation": "Ограничьте поиск каталогом проекта: find ./build -name '*.tmp' -delete. Сначала без -delete, чтобы увидеть список.",
+      "reference": "docs/RUNBOOK.md#sync-destructive"
+    },
+    {
+      "id": "command-find-delete-outside-cwd",
+      "class": "command-destructive",
+      "severity": "MEDIUM",
+      "match": {
+        "kind": "command",
+        "argv0": ["find"],
+        "flags_all": ["--delete"],
+        "target_outside_cwd": true
+      },
+      "message": "find -delete за пределами рабочего каталога.",
+      "remediation": "Сначала тот же find без -delete и просмотр списка; затем подтверждение.",
+      "reference": "docs/RUNBOOK.md#sync-destructive"
+    },
+    {
+      "id": "command-shred-outside-cwd",
+      "class": "command-destructive",
+      "severity": "HIGH",
+      "match": {
+        "kind": "command",
+        "argv0": ["shred"],
+        "target_outside_cwd": true
+      },
+      "message": "shred необратимо затирает файл за пределами проекта — восстановить его не сможет никто.",
+      "remediation": "Затирание секретов вне проекта выполняет человек. Внутри проекта достаточно rm.",
+      "reference": "docs/RUNBOOK.md#sync-destructive"
+    },
+    {
+      "id": "command-wsl-unregister",
+      "class": "command-destructive",
+      "severity": "CRITICAL",
+      "match": {
+        "kind": "command",
+        "argv0": ["wsl", "wsl.exe", "wslconfig", "wslconfig.exe"],
+        "args_contain_any": ["--unregister", "/u"]
+      },
+      "message": "wsl --unregister уничтожает дистрибутив WSL вместе с его диском — это вся рабочая среда целиком.",
+      "remediation": "Удаление дистрибутивов выполняет человек из PowerShell после проверки экспорта (wsl --export).",
+      "reference": "docs/RUNBOOK.md#sync-destructive"
+    },
+    {
+      "id": "command-docker-prune-volumes",
+      "class": "command-destructive",
+      "severity": "MEDIUM",
+      "match": {
+        "kind": "command",
+        "argv0": ["docker"],
+        "args_contain_all": ["system", "prune"],
+        "flags_any": ["--volumes"]
+      },
+      "message": "docker system prune --volumes удаляет тома с данными всех остановленных проектов, не только текущего.",
+      "remediation": "Без --volumes: docker system prune -f. Конкретный том — docker volume rm <имя>.",
+      "reference": "docs/RUNBOOK.md#sync-destructive"
+    },
+    {
+      "id": "command-chown-recursive-root",
+      "class": "command-destructive",
+      "severity": "HIGH",
+      "match": {
+        "kind": "command",
+        "argv0": ["chown", "chgrp"],
+        "flags_all": ["--recursive"],
+        "target_root": true
+      },
+      "message": "Рекурсивная смена владельца корня или домашнего каталога ломает права системы и ssh.",
+      "remediation": "Ограничьтесь каталогом проекта: chown -R $USER ./path.",
+      "reference": "docs/RUNBOOK.md#sync-destructive"
+    },
+    {
+      "id": "command-tar-extract-root",
+      "class": "command-destructive",
+      "severity": "MEDIUM",
+      "match": {
+        "kind": "command",
+        "argv0": ["tar"],
+        "flags_all": ["--extract"],
+        "args_regex_any": ["(?:^|\\s)(?:-C|--directory)(?:=|\\s+)(?:/|~|\\$HOME|\\$\\{HOME\\})/*(?:\\s|$)"]
+      },
+      "message": "Распаковка архива в корень или домашний каталог перезаписывает существующие файлы и конфиги.",
+      "remediation": "Распакуйте во временный каталог (mktemp -d), сравните и перенесите нужное вручную.",
+      "reference": "docs/RUNBOOK.md#sync-destructive"
+    },
+    {
+      "id": "command-cp-recursive-root",
+      "class": "command-destructive",
+      "severity": "MEDIUM",
+      "match": {
+        "kind": "command",
+        "argv0": ["cp"],
+        "flags_any": ["--recursive", "--archive"],
+        "dest_root": true
+      },
+      "message": "Рекурсивное копирование в домашний каталог или корень перезаписывает существующие файлы.",
+      "remediation": "Копируйте в подкаталог и переносите нужное осознанно; для dotfiles — симлинки из репозитория.",
+      "reference": "docs/RUNBOOK.md#sync-destructive"
+    },
+    {
       "id": "git-filter-branch",
       "class": "git-destructive",
       "severity": "HIGH",

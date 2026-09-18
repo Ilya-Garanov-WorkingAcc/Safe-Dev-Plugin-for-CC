@@ -27,6 +27,7 @@ DIRECT = "direct"
 SUBSHELL = "subshell"
 INTERPRETER = "interpreter"
 PIPE = "pipe"
+SCRIPT = "script"          # извлечено из файла shell-скрипта, который запускает команда
 
 CONTROL_OPS = (";;", "&&", "||", ";", "|&", "|", "&", "\n")
 REDIR_RE = re.compile(r"^(?:\d*(?:>>|>\||>&|>|<<<|<<|<&|<))$")
@@ -81,6 +82,8 @@ FLAG_ALIASES = {
     "xxd": {"-r": "--revert"},
     "openssl": {"-d": "--decrypt"},
     "shred": {"-u": "--remove", "-z": "--zero"},
+    # rsync: `--del` — псевдоним --delete-during; остальные --delete-* уже длинные.
+    "rsync": {"--del": "--delete-during"},
 }
 
 # Флаги, забирающие следующий аргумент: без этого значение флага попало бы в
@@ -98,6 +101,21 @@ VALUE_FLAGS = {
     "awk": {"-v", "-f"},
     "docker": {"-e", "-v", "--name", "-p", "--env", "--volume"},
     "openssl": {"-in", "-out", "-k", "-K", "-iv"},
+    # rsync: без этого `-e ssh` дал бы операнд `ssh`, а `--exclude .venv` —
+    # операнд `.venv`, и назначение (последний операнд) определялось бы неверно.
+    "rsync": {"-e", "--rsh", "-f", "--filter", "-T", "--temp-dir", "-B",
+              "--block-size", "-M", "--remote-option", "--exclude", "--include",
+              "--exclude-from", "--include-from", "--files-from", "--log-file",
+              "--log-file-format", "--bwlimit", "--timeout", "--contimeout",
+              "--port", "--address", "--sockopts", "--chmod", "--chown",
+              "--link-dest", "--compare-dest", "--copy-dest", "--backup-dir",
+              "--suffix", "--max-size", "--min-size", "--max-delete",
+              "--max-alloc", "--out-format", "--info", "--debug", "--partial-dir",
+              "--password-file", "--rsync-path", "--usermap", "--groupmap",
+              "--checksum-choice", "--compress-choice", "--compress-level",
+              "--skip-compress", "--modify-window", "--outbuf", "--iconv",
+              "--block-size", "--stop-after", "--stop-at", "--write-batch",
+              "--only-write-batch", "--read-batch", "--protocol"},
 }
 
 # Признаки исполнения команды из кода интерпретатора (TS.md §7.2).
@@ -132,6 +150,9 @@ class Cmd:
     redirects: tuple = ()
     assignments: tuple = ()
     var_argv0: bool = False
+    # Имя команды как написано (`./deploy/e2e-test.sh`, `/usr/bin/rm`): argv0
+    # нормализован до basename, а хуку нужен путь, чтобы открыть файл скрипта.
+    argv0_text: str = ""
 
 
 @dataclass
@@ -512,7 +533,8 @@ def _build(words, depth, origin, position, pipeline_index, state):
     cmd = Cmd(argv0=argv0, args=args, flags=flags, operands=operands,
               depth=depth, origin=origin, raw=raw, pipeline=pipeline_index,
               position=position, redirects=tuple(redirects),
-              assignments=tuple(assignments), var_argv0=var_argv0)
+              assignments=tuple(assignments), var_argv0=var_argv0,
+              argv0_text=_render(head).strip().lstrip("\\"))
 
     if argv0 == "alias":
         for arg in args:

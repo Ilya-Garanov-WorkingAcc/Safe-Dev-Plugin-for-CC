@@ -239,6 +239,71 @@ for encoding in ("cp1251", "cp1252", "cp437"):
     check("решение переживает {}".format(encoding), ok,
           (proc.stdout or proc.stderr)[:60])
 
+print("=== N: синхронизация с удалением в дом/корень ({} шт.) ===".format(
+    len(bypass_corpus.SYNC_ROOT)))
+missed = []
+for label, command in bypass_corpus.SYNC_ROOT:
+    result = run(command)
+    if decision(result) != "deny":
+        missed.append("{}={}".format(label, decision(result)))
+check("rsync --delete в дом/корень — всегда deny", not missed, str(missed))
+reason = (run("rsync -a --delete ./public/ ~/").get("hookSpecificOutput") or {}).get(
+    "permissionDecisionReason", "")
+check("в отказе назван rsync и назначение", "rsync" in reason and "~/" in reason,
+      reason[:80])
+
+print("=== O: синхронизация/удаление, не проверяемые статически ({} шт.) ===".format(
+    len(bypass_corpus.SYNC_ASK)))
+missed = []
+for label, command in bypass_corpus.SYNC_ASK:
+    if not blocked(run(command)):
+        missed.append(label)
+check("минимум ask", not missed, str(missed))
+
+print("=== P: синхронизация внутри проекта не мешает ({} шт.) ===".format(
+    len(bypass_corpus.SYNC_OK)))
+false_positives = []
+for command in bypass_corpus.SYNC_OK:
+    result = run(command)
+    if blocked(result):
+        false_positives.append("{} -> {}".format(command, decision(result)))
+check("ни deny, ни ask", not false_positives, "; ".join(false_positives[:3]))
+
+print("=== Q: прозрачность скриптов (инцидент 18.09.2026) ===")
+SCRIPTS = os.path.join(WORKDIR, "deploy")
+os.makedirs(SCRIPTS, exist_ok=True)
+with open(os.path.join(SCRIPTS, "e2e-test.sh"), "w", encoding="utf-8") as fh:
+    fh.write("#!/usr/bin/env bash\nset -euo pipefail\n"
+             "python3 generate.py --out public\n"
+             "rsync -a --delete ./public/ ~/\n")
+with open(os.path.join(SCRIPTS, "vars.sh"), "w", encoding="utf-8") as fh:
+    fh.write("#!/bin/bash\nDST=\"$HOME/$EMPTY_VAR/\"\n"
+             "rsync -a --delete \"$SRC/\" \"$DST\"\n")
+with open(os.path.join(SCRIPTS, "noext"), "w", encoding="utf-8") as fh:
+    fh.write("#!/bin/sh\nrm -rf ~\n")
+with open(os.path.join(SCRIPTS, "benign.sh"), "w", encoding="utf-8") as fh:
+    fh.write("#!/usr/bin/env bash\nset -e\necho hi\nls -la\n"
+             "python3 -m pytest -q\nrsync -a --delete build/ dist/\n")
+os.chmod(os.path.join(SCRIPTS, "noext"), 0o755)
+for label, command in [
+        ("bash file",           "bash deploy/e2e-test.sh"),
+        ("sh file",             "sh deploy/e2e-test.sh"),
+        ("bash -x file",        "bash -x deploy/e2e-test.sh"),
+        ("прямой запуск",       "./deploy/e2e-test.sh"),
+        ("абсолютный путь",     os.path.join(SCRIPTS, "e2e-test.sh")),
+        ("chmod && запуск",     "chmod +x deploy/e2e-test.sh && ./deploy/e2e-test.sh"),
+        ("source",              "source deploy/e2e-test.sh"),
+        ("точка",               ". deploy/e2e-test.sh"),
+        ("без расширения, shebang", "./deploy/noext")]:
+    check("скрипт: {} → deny".format(label), decision(run(command)) == "deny",
+          str(decision(run(command))))
+check("скрипт с переменной в назначении → ask/deny",
+      blocked(run("bash deploy/vars.sh")), str(decision(run("bash deploy/vars.sh"))))
+check("безобидный скрипт проходит", not blocked(run("bash deploy/benign.sh")),
+      str(decision(run("bash deploy/benign.sh"))))
+check("несуществующий скрипт не роняет хук",
+      not blocked(run("bash deploy/missing.sh")))
+
 shutil.rmtree(TMP, ignore_errors=True)
 print("\nSUMMARY:", "ALL PASSED" if not FAILS else "FAILED({}) {}".format(
     len(FAILS), FAILS))

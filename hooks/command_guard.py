@@ -10,8 +10,10 @@ root), T9 (персистентность через shell-конфиг).
 останавливать работу команды.
 """
 
+import dataclasses
 import fnmatch
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -20,6 +22,19 @@ from lib import audit, cmdparse, config, hookio, policy, ruleset  # noqa: E402
 
 HOOK = "command_guard"
 MAX_AUDIT_RECORDS = 8
+
+# Прозрачность скриптов: команда `bash deploy/e2e-test.sh` сама по себе
+# безобидна, опасно содержимое файла. Файл читается и разбирается теми же
+# правилами — один уровень вглубь, с ограничением размера, чтобы уложиться в
+# бюджет PreToolUse. Инцидент 18.09.2026: rsync --delete с назначением `~`
+# был внутри тестового скрипта деплоя, и по командной строке его не видно.
+SCRIPT_MAX_BYTES = 256 * 1024
+SCRIPT_SUFFIXES = (".sh", ".bash", ".zsh", ".ksh")
+SCRIPT_SHEBANG_RE = re.compile(r"^#!\s*(?:/usr/bin/env\s+)?(?:\S*/)?(?:ba|z|k|da|a)?sh\b")
+
+# Назначение вычисляется на лету: подстановка, обратные кавычки, переменная
+# (`"$HOME/$EMPTY/"` при пустой переменной — это `~/`), пустая строка.
+DYNAMIC_DEST_RE = re.compile(r"\$\(\)|`|\$\{?[A-Za-z_]")
 
 # Предупреждения парсера, при которых команда считается неразобранной.
 # Все они означают одно: статически неизвестно, что будет выполнено.
@@ -37,6 +52,11 @@ def build_context(cmd, cwd):
     """Контекст для матчера: то, что знает хук, но не знает парсер."""
     expanded = [cmdparse.expand_operand(op, cwd) for op in cmd.operands]
     expanded_redirects = [cmdparse.expand_operand(r, cwd) for r in cmd.redirects]
+    positional = [op for op in cmd.operands if not op.startswith("-")]
+    # Назначение — последний позиционный операнд (rsync, cp, mv, tar -C — нет,
+    # у tar это значение флага, см. правило по args_regex_any).
+    dest = positional[-1] if len(positional) >= 2 else None
+    dest_expanded = cmdparse.expand_operand(dest, cwd) if dest else None
     return {
         "expanded_operands": expanded,
         "expanded_redirects": expanded_redirects,
@@ -46,7 +66,74 @@ def build_context(cmd, cwd):
         "has_root_target": any(_is_root_target(raw, exp, cwd)
                                for raw, exp in zip(cmd.operands, expanded)),
         "branch_protected": _branch_protected(cmd, cwd),
+        "dest": dest or "",
+        "dest_root": bool(dest) and _is_root_target(dest, dest_expanded, cwd),
+        "dest_outside_cwd": bool(dest) and cmdparse.outside_cwd(dest, cwd),
+        "dest_dynamic": dest is not None and (dest == "" or
+                                              bool(DYNAMIC_DEST_RE.search(dest))),
     }
+
+
+def script_path(cmd, cwd):
+    """Путь к shell-скрипту, который выполняет команда, либо None.
+
+    Три формы: явный интерпретатор (`bash x.sh`, `sh -x x.sh`), прямой запуск
+    файла (`./x.sh`, `/opt/app/deploy.sh`) и подключение (`source x.sh`).
+    `bash -c '...'` сюда не попадает — код уже разобран парсером.
+    """
+    candidate = None
+    if cmd.argv0 in cmdparse.SHELLS or cmd.argv0 in ("source", "."):
+        if "-c" in cmd.flags:
+            return None
+        positional = [op for op in cmd.operands if not op.startswith("-")]
+        candidate = positional[0] if positional else None
+    elif "/" in cmd.argv0_text or cmd.argv0_text.endswith(SCRIPT_SUFFIXES):
+        candidate = cmd.argv0_text
+    if not candidate or "$()" in candidate or candidate.startswith("-"):
+        return None
+    path = cmdparse.expand_operand(candidate, cwd)
+    try:
+        if not os.path.isfile(path) or os.path.getsize(path) > SCRIPT_MAX_BYTES:
+            return None
+        with open(path, "rb") as fh:
+            head = fh.read(200)
+    except OSError:
+        return None
+    if b"\x00" in head:
+        return None                                   # бинарник, не скрипт
+    first = head.split(b"\n", 1)[0].decode("utf-8", "replace")
+    if (cmd.argv0 in cmdparse.SHELLS or cmd.argv0 in ("source", ".")
+            or path.endswith(SCRIPT_SUFFIXES) or SCRIPT_SHEBANG_RE.match(first)):
+        return path
+    return None
+
+
+def script_commands(cmds, cwd):
+    """Команды из файлов скриптов, которые запускает командная строка.
+
+    Один уровень вглубь: скрипт, вызывающий скрипт, дальше не раскрывается —
+    бюджет PreToolUse важнее полноты, а первый уровень закрывает типовой
+    случай «агент написал скрипт и запустил его».
+    """
+    extra = []
+    seen = set()
+    for cmd in cmds:
+        path = script_path(cmd, cwd)
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                text = fh.read(SCRIPT_MAX_BYTES)
+        except OSError:
+            continue
+        inner, _warnings = cmdparse.parse(text)
+        label = os.path.relpath(path, cwd) if cwd else path
+        for c in inner:
+            extra.append(dataclasses.replace(
+                c, origin=cmdparse.SCRIPT, depth=c.depth + 1,
+                raw="{}: {}".format(label, c.raw)))
+    return extra
 
 
 def _is_root_target(raw, expanded, cwd):
@@ -106,11 +193,15 @@ def collect_matches(command, cmds, cwd):
             continue
         if kind != "command":
             continue
+        dest_rule = any(k.startswith("dest_") for k in rule["match"])
         for cmd in cmds:
             ctx = build_context(cmd, cwd)
             if ruleset.match_command(cmd, rule, ctx):
-                target = (cmd.operands[0] if cmd.operands
-                          else (cmd.redirects[0] if cmd.redirects else cmd.argv0))
+                if dest_rule and ctx.get("dest"):
+                    target = ctx["dest"]
+                else:
+                    target = (cmd.operands[0] if cmd.operands
+                              else (cmd.redirects[0] if cmd.redirects else cmd.argv0))
                 matches.append((rule, cmd, target))
                 break            # одного срабатывания правила достаточно
     return matches
@@ -164,6 +255,11 @@ def main():
     agent_id = data.get("agent_id")
 
     cmds, warnings = cmdparse.parse(command)
+    # Предупреждения парсера из файлов скриптов не эскалируются: в любом
+    # install.sh полно `$CMD "$@"`, и ask на каждый такой запуск — ложное
+    # срабатывание. Правила по разобранным командам скрипта действуют в полную
+    # силу, а всё динамическое в НАЗНАЧЕНИИ синхронизации ловит dest_dynamic.
+    cmds = cmds + script_commands(cmds, cwd)
     matches = collect_matches(command, cmds, cwd)
     best, resolutions = decide(matches, session_id, agent_id)
 

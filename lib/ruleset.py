@@ -288,6 +288,22 @@ def match_command(cmd, rule, ctx=None):
             return False
     if m.get("require_operands") and not cmd.operands:
         return False
+
+    # Ключи dest_*: про НАЗНАЧЕНИЕ (последний операнд), а не про любой операнд.
+    # `rsync -a --delete ~/ /backup/` копирует дом — это нормально; опасен
+    # `rsync -a --delete out/ ~/`, где домашний каталог стоит справа. Инцидент
+    # 18.09.2026 был ровно таким: назначение синхронизации разрешилось в `~`.
+    if m.get("dest_root") and not ctx.get("dest_root"):
+        return False
+    if m.get("dest_outside_cwd") and not ctx.get("dest_outside_cwd"):
+        return False
+    if m.get("dest_dynamic") and not ctx.get("dest_dynamic"):
+        return False
+    drx = m.get("dest_regex_any")
+    if drx:
+        dest = ctx.get("dest") or ""
+        if not any(re.search(p, dest) for p in drx):
+            return False
     return True
 
 

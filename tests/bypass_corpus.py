@@ -11,6 +11,8 @@
 штатный исход, а не поблажка (ADR-002).
 """
 
+import os
+
 # --- rm -rf / и его вариации ----------------------------------------------
 RM_ROOT = [
     ("прямой",                 "rm -rf /"),
@@ -398,5 +400,72 @@ KNOWN_NON_EXPLOITABLE = [
     ("zero-width space",       "rm​ -rf /"),
 ]
 
+# --- Синхронизация с удалением (инцидент 18.09.2026) -----------------------
+# rsync --delete с назначением в домашний каталог стёр /home целиком. Ловится
+# по НАЗНАЧЕНИЮ (последний операнд), а не по любому операнду: копирование
+# дома в бэкап — легитимно, копирование в дом с --delete — нет.
+SYNC_ROOT = [
+    ("в дом",                  "rsync -a --delete ./public/ ~/"),
+    ("в дом без слэша",        "rsync -a --delete ./public/ ~"),
+    ("в $HOME",                "rsync -a --delete public/ $HOME/"),
+    ("в ${HOME}",              "rsync -a --delete public/ ${HOME}/"),
+    # Путь берётся из HOME во время теста: батарея подменяет домашний каталог
+    # временным, и литерал /home/<user> там был бы просто «вне cwd».
+    ("абсолютный дом",         "rsync -rlt --delete src/ " + os.path.expanduser("~") + "/"),
+    ("в корень",               "rsync -a --delete-excluded out/ /"),
+    ("родитель cwd",           "rsync -a --delete-after out/ ../../"),
+    ("флаг впереди",           "rsync --delete -a out/ ~/"),
+    ("--del",                  "rsync -a --del out/ ~/"),
+    ("--delete-before",        "rsync -a --delete-before out/ ~/"),
+    ("--delete-during",        "rsync -a --delete-during out/ ~/"),
+    ("--delete-delay",         "rsync -a --delete-delay out/ ~/"),
+    ("--remove-source-files",  "rsync -a --remove-source-files out/ ~/"),
+    ("с -e ssh",               "rsync -a --delete -e ssh out/ ~/"),
+    ("с --exclude",            "rsync -a --exclude .venv --delete out/ ~/"),
+    ("с --exclude=",           "rsync -a --exclude=.venv --delete out/ ~/"),
+    ("bash -c",                "bash -c 'rsync -a --delete out/ ~/'"),
+    ("через env",              "env rsync -a --delete out/ ~/"),
+    ("после &&",               "python3 generate.py && rsync -a --delete public/ ~/"),
+    ("localhost без пути",     "rsync -a --delete out/ user@localhost:"),
+    ("127.0.0.1 без пути",     "rsync -a --delete -e ssh out/ igaranov@127.0.0.1:"),
+    ("localhost с путём ~",    "rsync -a --delete out/ localhost:~/"),
+]
+
+# Нельзя проверить статически → минимум ask.
+SYNC_ASK = [
+    ("удалённый хост",         "rsync -a --delete out/ user@server:/var/www/app/"),
+    ("пустая переменная",      "rsync -a --delete out/ \"$HOME/$EMPTY/\""),
+    ("переменная назначения",  "rsync -a --delete \"$SRC/\" \"$DST/\""),
+    ("подстановка",            "rsync -a --delete out/ $(cat dest)/"),
+    ("вне cwd",                "rsync -a --delete out/ /tmp/deploy/"),
+    ("find -delete от дома",   "find ~ -name '*.tmp' -delete"),
+    ("find -delete от корня",  "find / -type f -name core -delete"),
+    ("find -delete вне cwd",   "find /var/www -name '*.log' -delete"),
+    ("shred вне cwd",          "shred -u /etc/hosts"),
+    ("wsl --unregister",       "wsl.exe --unregister Ubuntu"),
+    ("wsl -unregister",        "wsl --unregister Ubuntu-restored"),
+    ("docker prune volumes",   "docker system prune -a --volumes -f"),
+    ("chown -R корня",         "chown -R igaranov /"),
+    ("tar -x в дом",           "tar -xzf home.tar.gz -C ~"),
+    ("tar -x в корень",        "tar -xf backup.tar -C /"),
+    ("cp -r в дом",            "cp -r dotfiles/. ~/"),
+    ("зеркало дома в бэкап",   "rsync -a --delete ~/ /mnt/c/backup/wsl/home/"),
+]
+
+# Не должны давать ни deny, ни ask: обычная работа внутри проекта.
+SYNC_OK = [
+    "rsync -a --delete build/ dist/",
+    "rsync -avz --delete ./public/ ./out/",
+    "rsync -a --exclude .venv --delete . ./mirror/",
+    "rsync -a src/ ~/backup/",
+    "rsync -a --delete out/ user@server:/var/www/app/ --dry-run",
+    "rsync -a --delete -n out/ ~/",
+    "find . -name '*.pyc' -delete",
+    "find ./build -type f -delete",
+    "tar -xzf archive.tar.gz -C ./vendor",
+    "cp -r src/ backup/",
+    "docker system prune -f",
+]
+
 ALL_BLOCKING = (RM_ROOT + SUDO + DESTRUCTIVE + GIT_DESTRUCTIVE + PARSER_GAPS
-                + NEW_GAPS)
+                + NEW_GAPS + SYNC_ROOT + SYNC_ASK)
