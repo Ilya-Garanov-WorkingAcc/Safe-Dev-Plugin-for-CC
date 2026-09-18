@@ -120,6 +120,45 @@ sudo. То есть `sudo` из агента отрабатывает молча
 
 ---
 
+## sync-destructive
+
+**Что произошло.** Синхронизация или массовое удаление, у которых разрушительна
+не команда, а её **назначение**: `rsync --delete` удаляет в назначении всё,
+чего нет в источнике; `find -delete`, `shred`, `chown -R`, распаковка в корень,
+`wsl --unregister`, `docker system prune --volumes`. Правила этой группы живут
+в классе `command-destructive` и смотрят на последний операнд (`dest_*`), а не
+на любой: `rsync --delete ~/ /backup/` копирует дом — это нормально,
+`rsync --delete out/ ~/` вычищает дом — это инцидент 18.09.2026
+(`docs/INCIDENT-2026-09-18.md`).
+
+**Прозрачность скриптов.** `bash deploy/test.sh`, `./deploy/test.sh`,
+`source x.sh` — файл читается и разбирается теми же правилами (один уровень
+вглубь, до 256 КБ). Отказ называет скрипт и строку: `deploy/e2e-test.sh: rsync …`.
+
+**Что делать по видам.**
+
+| Сработало | Штатная замена |
+|---|---|
+| `rsync --delete … ~/`, `… /`, `… ../` (CRITICAL) | Назначение — подкаталог проекта или `mktemp -d`; тесты деплоя только в песочнице |
+| `rsync --delete … user@localhost:` (CRITICAL) | Пустой путь после двоеточия — это `~`; указать `localhost:/tmp/deploy-XXXX/` |
+| `rsync --delete … "$DST/"`, `$(…)` (ask) | `echo "$DST"` и проверить; в скриптах `set -u` и `[ -n "$DST" ]` |
+| `rsync --delete` на удалённый хост (ask) | Сначала `--dry-run`, просмотреть список удалений |
+| `rsync --delete` вне рабочего каталога (ask) | Убедиться, что назначение — зеркало источника |
+| `rsync --delete` внутри проекта (warn) | Если назначение не зеркало — убрать `--delete` |
+| `find / … -delete`, `find ~ … -delete` (CRITICAL) | `find ./build … -delete`; сначала без `-delete` |
+| `shred` вне проекта (HIGH) | Затирание секретов вне проекта выполняет человек |
+| `wsl --unregister` (CRITICAL) | Только человек из PowerShell после `wsl --export` |
+| `docker system prune --volumes` (ask) | `docker system prune -f`; конкретный том — `docker volume rm` |
+| `chown -R … /`, `… ~` (HIGH) | `chown -R $USER ./path` |
+| `tar -x … -C ~`, `cp -r … ~/` (ask) | Распаковать/скопировать в `mktemp -d`, перенести нужное |
+
+**Если дом уже стёрт.** Не перезапускать сессию агента (`--resume` повторит
+шаг). Проверить бэкапы: `C:\backup\wsl\home\home-*.tar.gz` (ежедневно),
+`C:\backup\wsl\exports\*.tar` (еженедельный `wsl --export`) — восстановление
+`wsl --import`. Подробно: `docs/INCIDENT-2026-09-18.md`.
+
+---
+
 ## git-destructive
 
 **Что произошло.** Команда git способна уничтожить незакоммиченную работу или

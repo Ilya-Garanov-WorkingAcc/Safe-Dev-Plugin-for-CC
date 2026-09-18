@@ -105,11 +105,14 @@ check("возвращены watchPaths",
       ".mcp.json" in ((result.get("hookSpecificOutput") or {}).get("watchPaths") or []))
 
 print("=== C2: формулировка sudo честна относительно уровня privilege ===")
+# P0-фикс прожарки AGGG (2026-08): дефолтная политика для класса privilege
+# теперь strict, а не audit — иначе `sudo` из агента фиксировался в журнале,
+# но фактически разрешался (00-СВОДКА-ПРОЖАРКА.md). Дефолт в этом тесте
+# соответствует новой политике: сообщение сразу про недоступность.
 result = run()
 context = (result.get("hookSpecificOutput") or {}).get("additionalContext", "")
-check("на дефолтном audit — про журнал, не про недоступность",
-      "фиксируются в журнале" in context and "недоступна" not in context,
-      context[:90])
+check("на дефолтном strict — про недоступность",
+      "недоступна" in context, context[:90])
 
 with open(os.path.join(os.environ["HOME"], ".claude", "secure-dev.local.json"),
           "w", encoding="utf-8") as fh:

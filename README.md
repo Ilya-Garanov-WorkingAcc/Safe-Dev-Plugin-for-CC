@@ -40,6 +40,7 @@ heartbeat. Хуки продолжают работать даже при `--dan
 | Секрет уходит в исходящий вызов или в контекст модели | `secret_redactor` |
 | **RCE из клонированного репозитория** (CVE-2025-59536, CVE-2025-59356, CVE-2026-21852) | `config_trust` + `secure-dev scan` |
 | Разрушение рабочей машины: `rm -rf /`, `dd`, `mkfs`, форк-бомба | `command_guard` |
+| **Синхронизация с удалением в дом/корень**: `rsync --delete`, `find -delete`, `shred`, `wsl --unregister`, `chown -R /` — по назначению, а не по любому операнду; команды внутри запускаемых скриптов (`bash x.sh`, `./x.sh`) разбираются так же | `command_guard`, RUNBOOK `sync-destructive` |
 | Потеря работы в git: `checkout --`, `reset --hard`, `clean -f`, force-push | `command_guard` |
 | Эскалация до root (в WSL sudo обычно без пароля) | `command_guard`, класс `privilege` |
 | Персистентность через `.bashrc`, cron, systemd, `/etc/wsl.conf` | `command_guard`, класс `persistence` |
