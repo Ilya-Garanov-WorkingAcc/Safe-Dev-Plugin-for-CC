@@ -120,12 +120,22 @@ for label, ti in [
         ("Write .git/hooks",       {"file_path": os.path.join(WORK, ".git", "hooks", "pre-commit"), "content": "x"})]:
     check("персистентность Write: {} → блок".format(label),
           blocked(tool("Write", ti)), tool("Write", ti))
+GITHOOK = os.path.join(WORK, ".git", "hooks", "pre-commit")
 for label, command in [
         ("дозапись в authorized_keys", "echo k >> " + AUTH),
+        ("tee в authorized_keys",  "echo k | tee " + AUTH),
         ("tee в .bashrc",          "echo x | tee -a " + BASHRC),
+        ("редирект в .bashrc",     "echo x > " + BASHRC),
+        ("cp в .bashrc",           "cp /tmp/src " + BASHRC),
+        ("редирект в .git/hooks",  "echo x >> " + GITHOOK),
+        ("tee в .git/hooks",       "echo x | tee " + GITHOOK),
+        ("sed -i .bashrc",         "sed -i s/a/b/ " + BASHRC),
         ("export LD_PRELOAD",      "export LD_PRELOAD=/tmp/x.so"),
         ("systemd-run --on-calendar", "systemd-run --on-calendar=daily true")]:
     check("персистентность Bash: {} → блок".format(label), blocked(bash(command)), bash(command))
+check("обычная запись в проект не блокируется",
+      not blocked(bash("echo x > " + os.path.join(WORK, "notes.txt"))),
+      bash("echo x > " + os.path.join(WORK, "notes.txt")))
 
 print("=== C: git ===")
 GIT_BLOCK = ["git checkout .", "git checkout -f", "git checkout HEAD -- src/",
@@ -179,6 +189,27 @@ OK = ["docker ps", "docker run -v $PWD:/app img", "kubectl get pods",
       "psql -c 'SELECT 1'", "chmod 755 file", "chmod +x script.sh"]
 fp = [c for c in OK if blocked(bash(c))]
 check("рабочие docker/kubectl/psql/chmod не блокируются", not fp, fp)
+
+print("=== G2: защита Windows-монтирования /mnt/c (тест 3.0.0 на субагенте) ===")
+# Запись через редирект и файловые инструменты в каталоги улик/восстановления
+# инцидента и системные каталоги Windows раньше шла мимо (ловились только
+# rm/cp/mv). Теперь закрыты все формы записи.
+BK = "/mnt/" + "c/backup/wsl/incident-2026-09-18/evidence"
+SYS = "/mnt/" + "c/Windows/system32/y"
+for label, command in [
+        ("редирект >",   "echo x > " + BK),
+        ("редирект >>",  "echo x >> " + BK),
+        ("в system32",   "echo x > " + SYS),
+        ("tee",          "echo x | tee " + BK),
+        ("rm",           "rm " + BK)]:
+    check("защита /mnt/c Bash: {} → блок".format(label), blocked(bash(command)), bash(command))
+for label, name, ti in [
+        ("Write",        "Write", {"file_path": BK, "content": "y"}),
+        ("Edit",         "Edit", {"file_path": BK, "old_string": "a", "new_string": "b"}),
+        ("NotebookEdit", "NotebookEdit", {"notebook_path": SYS, "new_source": "x"})]:
+    check("защита /mnt/c {} → блок".format(label), blocked(tool(name, ti)), tool(name, ti))
+check("обычный файл на /mnt/c не блокируется",
+      not blocked(tool("Write", {"file_path": "/mnt/c/projects/app/out.txt", "content": "x"})))
 
 print("=== H: расширенный список секретных путей (чтение) ===")
 READ = ["cat ~/.config/gh/hosts.yml", "cat ~/.bash_history", "cat ~/.claude.json",

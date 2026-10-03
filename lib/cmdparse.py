@@ -1625,24 +1625,48 @@ def _quote(value):
     return value
 
 
+def _executed_names(cmds):
+    """Базовые имена файлов, которые в этой строке реально исполняются.
+
+    `bash x.sh`, `source x`, `chmod +x x`, `./x`, `eval` и т. п. До 3.0.1
+    признак «есть исполнитель» был глобальным по всей строке, поэтому
+    `cat > notes.md <<'EOF' … EOF && bash build.sh` ошибочно считал тело
+    notes.md скриптом (bash запускает build.sh, а не notes.md). Теперь тело
+    проверяется как скрипт, только если исполняется ИМЕННО его файл.
+    """
+    names = set()
+    for c in cmds:
+        if c.argv0 in HEREDOC_EXECUTORS:
+            for op in c.operands:
+                names.add(os.path.basename(op.rstrip("/")))
+        if c.argv0 in SHELLS and c.stdin_file:   # `sh < run` исполняет run
+            names.add(os.path.basename(c.stdin_file.rstrip("/")))
+        if "/" in c.argv0_text or c.argv0_text.endswith(SCRIPT_SUFFIXES):
+            names.add(os.path.basename(c.argv0_text.rstrip("/")))
+    return names
+
+
 def heredoc_scripts(cmds):
     """Heredoc-и, записывающие shell-скрипт: [(Heredoc, имя файла)].
 
     Тело, уходящее через cat/tee в файл, считается данными. Исключение —
-    запись скрипта: расширение или shebang как у shell-скрипта либо в той же
-    строке есть команда, способная файл исполнить (шелл, source, chmod,
-    запуск по пути). Тогда тело проверяется правилами, как файл скрипта.
+    запись скрипта: расширение или shebang как у shell-скрипта, либо файл
+    реально исполняется в этой же строке (`cat > run <<EOF … EOF; bash run`).
+    Документ, лишь упомянутый рядом с чужим исполнителем, скриптом не считается.
     """
-    executor = any(c.argv0 in HEREDOC_EXECUTORS or "/" in c.argv0_text
-                   for c in cmds)
+    executed = _executed_names(cmds)
+
+    def is_script(target, body):
+        return (target.endswith(SCRIPT_SUFFIXES)
+                or os.path.basename(target.rstrip("/")) in executed
+                or bool(SCRIPT_SHEBANG_RE.match(body.split("\n", 1)[0])))
+
     found = []
     for cmd in cmds:
         if cmd.argv0 in ("echo", "printf") and cmd.stdout_file:
-            # `printf '…' > run; bash run`: тот же приём, что и с heredoc, —
-            # файл пишется строкой и исполняется той же командой.
+            # `printf '…' > run; bash run`: файл пишется строкой и исполняется.
             body = "\n".join(cmd.args).replace("\\n", "\n")
-            script = cmd.stdout_file.endswith(SCRIPT_SUFFIXES)
-            if executor or script or SCRIPT_SHEBANG_RE.match(body):
+            if is_script(cmd.stdout_file, body):
                 found.append((Heredoc(body=body, kind=HEREDOC_DATA,
                                       target=cmd.stdout_file), cmd.stdout_file))
         for here in cmd.heredocs:
@@ -1650,11 +1674,10 @@ def heredoc_scripts(cmds):
                 continue
             # У tee файл — операнд, а stdout обычно уходит в /dev/null.
             targets = [here.target] + list(cmd.operands)
-            script = next((t for t in targets if t.endswith(SCRIPT_SUFFIXES)), None)
-            if (executor or script
-                    or SCRIPT_SHEBANG_RE.match(here.body.split("\n", 1)[0])):
-                found.append((here, script or next(
-                    (t for t in targets if t != "/dev/null"), here.target)))
+            hit = next((t for t in targets
+                        if t and t != "/dev/null" and is_script(t, here.body)), None)
+            if hit:
+                found.append((here, hit))
     return found
 
 

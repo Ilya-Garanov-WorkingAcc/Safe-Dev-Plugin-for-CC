@@ -656,8 +656,9 @@
       "severity": "CRITICAL",
       "match": {
         "kind": "command",
-        "argv0": ["rm", "rmdir", "unlink", "mv", "shred", "truncate", "dd", "tee", "cp"],
-        "target_glob": ["/mnt/c/backup/**", "/mnt/c/recovery/**", "/mnt/c/backup/wsl/incident-*/**"]
+        "argv0": ["rm", "rmdir", "unlink", "mv", "shred", "truncate", "dd", "tee", "cp", "echo", "printf", "cat"],
+        "target_glob": ["/mnt/*/backup/**", "/mnt/*/recovery/**", "/mnt/*/backup/wsl/incident-*/**"],
+        "redirect_glob": ["/mnt/*/backup/**", "/mnt/*/recovery/**", "/mnt/*/Windows/**", "/mnt/*/backup/wsl/incident-*/**"]
       },
       "message": "Запись или удаление в каталогах восстановления и бэкапов Windows (/mnt/c/backup, /mnt/c/recovery) — уликах и копиях после инцидента.",
       "remediation": "Эти каталоги трогает только человек (политика отдела после 18.09.2026).",

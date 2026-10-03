@@ -499,6 +499,8 @@ HEREDOC_OK = [
     ("команда после heredoc",  "cat > spec.md <<'EOF'\n" + _DOC + "EOF\nwc -l spec.md && git add spec.md"),
     ("два heredoc подряд",     "cat > a.md <<'A'; cat > b.md <<'B'\nrm -rf ~\nA\n$X\nB"),
     ("python без запуска команд", "python3 - <<'PY'\nimport json\nprint(json.dumps({'a': 1}))\nPY"),
+    ("документ + исполнитель рядом", "cat > notes.md <<'EOF'\n# план\nпример: rm -rf ~ и sudo\nEOF\nbash build.sh"),
+    ("документ + && ls", "cat > doc.md <<'EOF'\ntext\nEOF\nls -la"),
 ]
 
 # Тело — код либо случай не доказуем: минимум ask.

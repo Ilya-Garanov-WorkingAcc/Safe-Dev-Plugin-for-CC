@@ -71,10 +71,13 @@ _GLOB_TAIL_RE = re.compile(r"(?:/(?:\*\*?|\.\*|\.\[!.\]\*))+/?$")
 def build_context(cmd, cwd):
     """Контекст для матчера: то, что знает хук, но не знает парсер.
 
-    Цели раскрываются от каталога, в который команду привёл `cd` раньше в
-    той же строке (`cd / && rm -rf *` — это `rm -rf /*`), а «вне проекта»
-    по-прежнему считается относительно каталога, из которого запущена вся
-    строка.
+    `base` — каталог, в котором команда реально выполняется: после `cd /tmp/x
+    && rm -rf build` это `/tmp/x`, и `build` считается ВНУТРИ него, а не «вне
+    cwd». До 3.0.1 «вне cwd» мерилось от каталога сессии даже после явного
+    `cd`, и `cd <рабочий каталог> && rm -rf build` ложно блокировалось как
+    удаление вне проекта (найдено при тесте на субагенте). Защита от удаления
+    корня, домашнего каталога и предка сохраняется через root-target и
+    cwd_unsafe, которые тоже считаются от `base`.
     """
     base = cmdparse.effective_cwd(cmd, cwd)
     cwd_known = base is not None
@@ -98,16 +101,16 @@ def build_context(cmd, cwd):
         "expanded_operands": expanded,
         "expanded_redirects": expanded_redirects,
         "has_operand_outside_cwd": truncated or any(
-            _outside(exp, cwd) for _, exp in pairs),
-        "has_root_target": any(_is_root_target(raw, exp, cwd) for raw, exp in pairs),
-        "exempt_targets": _exempt_targets(pairs, cwd, truncated),
+            _outside(exp, base) for _, exp in pairs),
+        "has_root_target": any(_is_root_target(raw, exp, base) for raw, exp in pairs),
+        "exempt_targets": _exempt_targets(pairs, base, truncated),
         "operand_dynamic": not cwd_known and any(
             not raw.startswith(("/", "~")) for raw, _ in pairs),
         "cwd_unsafe": _unsafe_cwd(base),
         "branch_protected": _branch_protected(cmd, cwd),
         "dest": dest or "",
-        "dest_root": bool(dest) and _is_root_target(dest, dest_expanded, cwd),
-        "dest_outside_cwd": bool(dest) and _outside(dest_expanded, cwd),
+        "dest_root": bool(dest) and _is_root_target(dest, dest_expanded, base),
+        "dest_outside_cwd": bool(dest) and _outside(dest_expanded, base),
         "dest_dynamic": dest is not None and (dest == "" or not cwd_known or
                                               bool(DYNAMIC_DEST_RE.search(dest))),
     }

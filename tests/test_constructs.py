@@ -195,6 +195,24 @@ check("cd в неизвестный каталог → рекурсивный rm
       blocked(decision('cd "$HOME/$X" && rm -rf out')),
       decision('cd "$HOME/$X" && rm -rf out'))
 
+print("=== F2: уборка артефактов сборки не блокируется (тест 3.0.0) ===")
+# `cd <рабочий каталог> && rm -rf build` ложно блокировалось как «вне cwd»,
+# потому что «вне» мерилось от каталога сессии, а не от каталога после cd.
+other = os.path.join(TMP, "elsewhere")
+os.makedirs(os.path.join(other, "build"), exist_ok=True)
+for label, command, cwd in [
+        ("rm -rf build в cwd",        "rm -rf build", WORKDIR),
+        ("rm -rf ./dist в cwd",       "rm -rf ./dist", WORKDIR),
+        ("rm -r t1 в cwd",            "rm -r t1", WORKDIR),
+        ("cd другой каталог && rm -rf build", "cd {} && rm -rf build".format(other), WORKDIR),
+        ("cd каталог && rm -rf node_modules", "cd {} && rm -rf node_modules".format(other), WORKDIR)]:
+    check("уборка: {} — тихо".format(label),
+          not blocked(decision(command, cwd=cwd)), decision(command, cwd=cwd))
+# но удаление вне рабочего каталога без cd остаётся под контролем
+check("rm -rf абсолютного пути вне cwd (без cd) → блок",
+      blocked(decision("rm -rf {}/build".format(other), cwd=WORKDIR)),
+      decision("rm -rf {}/build".format(other), cwd=WORKDIR))
+
 print("=== G: рабочий каталог — дом или корень ===")
 home = os.environ["HOME"]
 check("rm -rf подкаталога дома из ~ → ask",

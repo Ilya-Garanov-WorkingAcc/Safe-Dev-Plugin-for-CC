@@ -3,6 +3,20 @@
   "description": "Чувствительные пути (TS.md §12.1). Тонкий слой поверх декларативных permissions.deny: те закрывают инструмент Read, но не закрывают `cat ~/.ssh/id_rsa` через Bash. Отличие от secret_redactor: тот читает и маскирует по содержимому, path_guard не даёт прочитать вовсе — regex может не распознать нестандартный формат ключа, а путь известен заранее.",
   "rules": [
     {
+      "id": "path-windows-protected",
+      "class": "self-protection",
+      "severity": "CRITICAL",
+      "match": {
+        "kind": "path",
+        "path_glob": ["/mnt/*/backup/**", "/mnt/*/recovery/**", "/mnt/*/backup/wsl/incident-*/**", "/mnt/*/Windows/**", "/mnt/*/Program Files/**", "/mnt/*/Program Files (x86)/**", "/mnt/*/Users/*/AppData/**", "/mnt/*/Users/*/ntuser.dat*", "/mnt/*/Recovery/**", "/mnt/*/System Volume Information/**"],
+        "write_tools": ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"],
+        "bash_writers": ["tee", "sed", "cp", "mv", "install", "truncate", "ln", "dd", "patch", "rm", "shred", "cat", "echo", "printf", "python", "python3", "perl", "node"]
+      },
+      "message": "Запись в защищённые каталоги Windows-диска: улики и копии инцидента 18.09.2026 (/mnt/c/backup, /mnt/c/recovery) и системные каталоги Windows. По политике отдела их трогает только человек.",
+      "remediation": "Эти каталоги человек изменяет сам, вне сессии агента (политика после 18.09.2026).",
+      "reference": "docs/RUNBOOK.md#self-protection"
+    },
+    {
       "id": "path-self-protection",
       "class": "self-protection",
       "severity": "CRITICAL",
@@ -24,7 +38,8 @@
       "match": {
         "kind": "path",
         "path_glob": ["**/.bashrc", "**/.bash_profile", "**/.bash_login", "**/.profile", "**/.zshrc", "**/.zprofile", "**/.zshenv", "**/.bash_aliases", "**/.bash_logout", "**/.envrc", "**/.config/fish/config.fish", "**/.ssh/authorized_keys", "**/.ssh/config", "**/.gitconfig", "**/.config/git/config", "**/.config/autostart/**", "**/.config/systemd/user/**", "**/.local/bin/**", "**/.git/hooks/**", "**/.git/config", "**/.npmrc", "**/.inputrc", "**/.pam_environment", "/etc/profile", "/etc/profile.d/**", "/etc/bash.bashrc", "/etc/environment", "/etc/cron*/**", "**/.config/environment.d/**"],
-        "write_tools": ["Write", "Edit", "MultiEdit", "NotebookEdit"]
+        "write_tools": ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"],
+        "bash_writers": ["tee", "sed", "cp", "mv", "install", "truncate", "ln", "dd", "patch", "cat", "echo", "printf", "python", "python3", "perl", "node"]
       },
       "message": "Запись в файл автозагрузки shell, ключи доступа или git-хуки — классический способ закрепиться в системе.",
       "remediation": "Постоянные настройки окружения добавляет человек осознанно. Для разовой переменной используйте её в самой команде: VAR=x your-cmd.",
@@ -39,7 +54,9 @@
         "path_glob": ["**/.ssh/**", "**/id_rsa*", "**/id_ed25519*", "**/id_ecdsa*", "**/id_dsa*", "**/authorized_keys"],
         "path_glob_not": ["**/*.pub"],
         "tools": ["Read", "Glob", "Grep", "Bash"],
-        "bash_readers": [".", "ag", "awk", "base32", "base64", "bat", "batcat", "cat", "column", "cp", "curl", "cut", "dd", "egrep", "emacs", "fold", "gpg", "grep", "gunzip", "gzip", "head", "hexdump", "install", "jq", "less", "ln", "more", "mv", "nano", "nc", "ncat", "nl", "node", "nvim", "od", "openssl", "paste", "perl", "php", "python", "python2", "python3", "rg", "rsync", "ruby", "scp", "sed", "shred", "sort", "source", "strings", "tac", "tail", "tar", "truncate", "uniq", "vi", "vim", "wget", "xxd", "yq", "zip"]
+        "bash_readers": [".", "ag", "awk", "base32", "base64", "bat", "batcat", "cat", "column", "cp", "curl", "cut", "dd", "egrep", "emacs", "fold", "gpg", "grep", "gunzip", "gzip", "head", "hexdump", "install", "jq", "less", "ln", "more", "mv", "nano", "nc", "ncat", "nl", "node", "nvim", "od", "openssl", "paste", "perl", "php", "python", "python2", "python3", "rg", "rsync", "ruby", "scp", "sed", "shred", "sort", "source", "strings", "tac", "tail", "tar", "truncate", "uniq", "vi", "vim", "wget", "xxd", "yq", "zip"],
+        "write_tools": ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"],
+        "bash_writers": ["tee", "sed", "cp", "mv", "install", "truncate", "ln", "dd", "patch", "cat", "echo", "printf", "python", "python3", "perl", "node"]
       },
       "message": "Приватные ключи SSH не читаются агентом.",
       "remediation": "Для работы с удалёнными хостами используйте ssh-agent: ключ остаётся в агенте, а команде достаточно `ssh host`. Публичный ключ (*.pub) читать можно.",
