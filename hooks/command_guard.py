@@ -12,6 +12,7 @@ root), T9 (персистентность через shell-конфиг).
 
 import dataclasses
 import fnmatch
+import glob as _glob
 import os
 import re
 import sys
@@ -22,15 +23,31 @@ from lib import audit, cmdparse, config, hookio, policy, ruleset  # noqa: E402
 
 HOOK = "command_guard"
 MAX_AUDIT_RECORDS = 8
+# Команда длиннее — `ask` без разбора: анализ мегабайтного ввода не уложится
+# в бюджет хука, а пропускать непроверенное нельзя.
+MAX_COMMAND_BYTES = 512 * 1024
+# Код (без тел heredoc-данных) длиннее — `ask` после разбора: в таком объёме
+# опасную команду проще спрятать, чем найти.
+MAX_CODE_BYTES = 16 * 1024
+# Раскрывать через realpath больше операндов бессмысленно дорого; остальные
+# считаются «вне рабочего каталога» — консервативно.
+MAX_EXPANDED_OPERANDS = 64
 
 # Прозрачность скриптов: команда `bash deploy/e2e-test.sh` сама по себе
 # безобидна, опасно содержимое файла. Файл читается и разбирается теми же
-# правилами — один уровень вглубь, с ограничением размера, чтобы уложиться в
-# бюджет PreToolUse. Инцидент 18.09.2026: rsync --delete с назначением `~`
+# правилами — до трёх уровней вглубь, с общим лимитом объёма, чтобы уложиться
+# в бюджет PreToolUse. Инцидент 18.09.2026: rsync --delete с назначением `~`
 # был внутри тестового скрипта деплоя, и по командной строке его не видно.
 SCRIPT_MAX_BYTES = 256 * 1024
-SCRIPT_SUFFIXES = (".sh", ".bash", ".zsh", ".ksh")
-SCRIPT_SHEBANG_RE = re.compile(r"^#!\s*(?:/usr/bin/env\s+)?(?:\S*/)?(?:ba|z|k|da|a)?sh\b")
+SCRIPT_TOTAL_BYTES = 512 * 1024
+SCRIPT_MAX_LEVELS = 3
+SCRIPT_GLOB_LIMIT = 8
+# Команды, способные создать файл, который та же строка затем исполняет:
+# `curl -o x.sh … && bash x.sh`, `git clone … && ./repo/install.sh`.
+PRODUCERS = {"curl", "wget", "aria2c", "git", "tar", "unzip", "7z", "bsdtar",
+             "cp", "mv", "ln", "install", "scp", "rsync", "gh"}
+SCRIPT_SUFFIXES = cmdparse.SCRIPT_SUFFIXES
+SCRIPT_SHEBANG_RE = cmdparse.SCRIPT_SHEBANG_RE
 
 # Назначение вычисляется на лету: подстановка, обратные кавычки, переменная
 # (`"$HOME/$EMPTY/"` при пустой переменной — это `~/`), пустая строка.
@@ -41,99 +58,219 @@ DYNAMIC_DEST_RE = re.compile(r"\$\(\)|`|\$\{?[A-Za-z_]")
 ESCALATING_WARNINGS = {
     "argv0_is_variable", "argv0_from_substitution", "interpreter_exec",
     "max_depth_exceeded", "too_many_commands", "recursion_limit",
-    "source_unresolved", "shell_c_unresolved",
+    "source_unresolved", "shell_c_unresolved", "heredoc_unresolved",
+    "command_too_long", "argv0_dynamic", "ifs_split", "shell_stdin_unresolved",
+    "script_unresolved",
 }
 
 _ROOT_LITERALS = {"/", "/.", "/*", "/**", "~", "~/", "~/*", "$HOME", "${HOME}",
                   "$HOME/", "$HOME/*", "${HOME}/*", "..", "../", "../*", "../.."}
+_GLOB_TAIL_RE = re.compile(r"(?:/(?:\*\*?|\.\*|\.\[!.\]\*))+/?$")
 
 
 def build_context(cmd, cwd):
-    """Контекст для матчера: то, что знает хук, но не знает парсер."""
-    expanded = [cmdparse.expand_operand(op, cwd) for op in cmd.operands]
-    expanded_redirects = [cmdparse.expand_operand(r, cwd) for r in cmd.redirects]
+    """Контекст для матчера: то, что знает хук, но не знает парсер.
+
+    Цели раскрываются от каталога, в который команду привёл `cd` раньше в
+    той же строке (`cd / && rm -rf *` — это `rm -rf /*`), а «вне проекта»
+    по-прежнему считается относительно каталога, из которого запущена вся
+    строка.
+    """
+    base = cmdparse.effective_cwd(cmd, cwd)
+    cwd_known = base is not None
+    base = base or cwd
+    operands = [op for op in cmd.operands[:MAX_EXPANDED_OPERANDS]
+                if not cmdparse.is_mktemp_path(op)]
+    truncated = len(cmd.operands) > MAX_EXPANDED_OPERANDS
+    expanded = [cmdparse.expand_operand(_target_dir(op), base) for op in operands]
+    expanded_redirects = [cmdparse.expand_operand(r, base)
+                          for r in cmd.redirects[:MAX_EXPANDED_OPERANDS]]
     positional = [op for op in cmd.operands if not op.startswith("-")]
     # Назначение — последний позиционный операнд (rsync, cp, mv, tar -C — нет,
     # у tar это значение флага, см. правило по args_regex_any).
     dest = positional[-1] if len(positional) >= 2 else None
-    dest_expanded = cmdparse.expand_operand(dest, cwd) if dest else None
+    if dest is not None and cmdparse.is_mktemp_path(dest):
+        dest = None
+    dest_expanded = cmdparse.expand_operand(_target_dir(dest), base) if dest else None
+    pairs = [(raw, exp) for raw, exp in zip(operands, expanded)
+             if not raw.startswith("-")]
     return {
         "expanded_operands": expanded,
         "expanded_redirects": expanded_redirects,
-        "has_operand_outside_cwd": any(
-            cmdparse.outside_cwd(op, cwd) for op in cmd.operands
-            if not op.startswith("-")),
-        "has_root_target": any(_is_root_target(raw, exp, cwd)
-                               for raw, exp in zip(cmd.operands, expanded)),
+        "has_operand_outside_cwd": truncated or any(
+            _outside(exp, cwd) for _, exp in pairs),
+        "has_root_target": any(_is_root_target(raw, exp, cwd) for raw, exp in pairs),
+        "exempt_targets": _exempt_targets(pairs, cwd, truncated),
+        "operand_dynamic": not cwd_known and any(
+            not raw.startswith(("/", "~")) for raw, _ in pairs),
+        "cwd_unsafe": _unsafe_cwd(base),
         "branch_protected": _branch_protected(cmd, cwd),
         "dest": dest or "",
         "dest_root": bool(dest) and _is_root_target(dest, dest_expanded, cwd),
-        "dest_outside_cwd": bool(dest) and cmdparse.outside_cwd(dest, cwd),
-        "dest_dynamic": dest is not None and (dest == "" or
+        "dest_outside_cwd": bool(dest) and _outside(dest_expanded, cwd),
+        "dest_dynamic": dest is not None and (dest == "" or not cwd_known or
                                               bool(DYNAMIC_DEST_RE.search(dest))),
     }
 
 
-def script_path(cmd, cwd):
-    """Путь к shell-скрипту, который выполняет команда, либо None.
+def _target_dir(raw):
+    """Каталог, который затрагивает цель с глобом на конце.
 
-    Три формы: явный интерпретатор (`bash x.sh`, `sh -x x.sh`), прямой запуск
-    файла (`./x.sh`, `/opt/app/deploy.sh`) и подключение (`source x.sh`).
+    `rm -rf /home/*` удаляет содержимое /home — по смыслу это цель `/home`;
+    `rm -rf *` — содержимое текущего каталога. Без этого `/home/*` раскрывался
+    в несуществующий путь со звёздочкой и не считался корневой целью.
+    """
+    if raw in ("*", "**", ".*", "./*", "./.*", "./"):
+        return "."
+    stripped = _GLOB_TAIL_RE.sub("", raw)
+    if stripped != raw:
+        return stripped or "/"
+    return raw
+
+
+def _outside(expanded, cwd):
+    if not expanded or not cwd:
+        return False
+    try:
+        root = os.path.realpath(cwd)
+    except OSError:
+        return True
+    return not (expanded == root or expanded.startswith(root + os.sep))
+
+
+def _unsafe_cwd(path):
+    """Рабочий каталог, внутри которого «относительный путь» ничего не
+    гарантирует: корень, домашний каталог или его предок. Агент, запущенный
+    из `~`, иначе удалял бы `~/projects` как «файлы внутри проекта»."""
+    try:
+        real = os.path.realpath(path or os.getcwd())
+        home = os.path.realpath(os.path.expanduser("~"))
+    except OSError:
+        return True
+    return real in ("/", home) or home.startswith(real.rstrip("/") + os.sep)
+
+
+def _exempt_targets(pairs, cwd, truncated):
+    """Цели, с которыми сверяется исключение из политики.
+
+    Пустой список — «исключение неприменимо»; None здесь не возвращается
+    (None означает вызывающего, который цели не раскрывал).
+
+    Исключение `**/node_modules/**` раньше проверялось по первому операнду как
+    написано: `rm -rf /tmp/a/node_modules/x /tmp/victim` и
+    `rm -rf /tmp/node_modules/../victim` проходили. Теперь исключению должен
+    удовлетворять КАЖДЫЙ операнд вне рабочего каталога, причём в раскрытом
+    виде; `..` в операнде исключение отменяет вовсе.
+    """
+    if truncated:
+        return []
+    if any(".." in raw.split("/") or "$" in raw or "`" in raw for raw, _ in pairs):
+        return []
+    outside = [exp for _, exp in pairs if _outside(exp, cwd)]
+    return outside or [exp for _, exp in pairs]
+
+
+def script_candidates(cmd, cwd, cmds=()):
+    """Файлы shell-скриптов, которые выполняет команда: (существующие, отсутствующие).
+
+    Формы: явный шелл (`bash x.sh`, `bash -o pipefail x.sh`, `bash < x.sh`),
+    прямой запуск (`./x.sh`, `/opt/app/deploy.sh`), подключение (`source x.sh`)
+    и `cat x.sh | bash`. Глоб в имени (`bash ev*.sh`) раскрывается.
     `bash -c '...'` сюда не попадает — код уже разобран парсером.
     """
-    candidate = None
-    if cmd.argv0 in cmdparse.SHELLS or cmd.argv0 in ("source", "."):
-        if "-c" in cmd.flags:
-            return None
+    base = cmdparse.effective_cwd(cmd, cwd) or cwd
+    names = []
+    if cmd.argv0 in cmdparse.SHELLS:
+        _code, has_c, script = cmdparse.shell_invocation(cmd.args)
+        if has_c:
+            return [], []
+        if script:
+            names.append(script)
+        elif cmd.stdin_file:
+            names.append(cmd.stdin_file)
+        elif cmd.shell_stdin and cmd.position > 0:
+            for other in cmds:                       # `cat x.sh | bash`
+                if (other.pipeline == cmd.pipeline and other.depth == cmd.depth
+                        and other.position == cmd.position - 1
+                        and other.argv0 == "cat" and other.operands):
+                    names.extend(other.operands)
+    elif cmd.argv0 in ("source", "."):
         positional = [op for op in cmd.operands if not op.startswith("-")]
-        candidate = positional[0] if positional else None
+        names.extend(positional[:1])
     elif "/" in cmd.argv0_text or cmd.argv0_text.endswith(SCRIPT_SUFFIXES):
-        candidate = cmd.argv0_text
-    if not candidate or "$()" in candidate or candidate.startswith("-"):
-        return None
-    path = cmdparse.expand_operand(candidate, cwd)
+        names.append(cmd.argv0_text)
+
+    found, missing = [], []
+    for name in names:
+        if not name or "$()" in name or name.startswith("-") or "$" in name:
+            continue
+        path = cmdparse.expand_operand(name, base)
+        paths = ([p for p in sorted(_glob.glob(path))[:SCRIPT_GLOB_LIMIT]]
+                 if re.search(r"[*?\[]", name) else [path])
+        for candidate in paths:
+            if not os.path.isfile(candidate):
+                missing.append(candidate)
+                continue
+            if _is_script(cmd, candidate):
+                found.append(candidate)
+    return found, missing
+
+
+def _is_script(cmd, path):
     try:
-        if not os.path.isfile(path) or os.path.getsize(path) > SCRIPT_MAX_BYTES:
-            return None
+        if os.path.getsize(path) > SCRIPT_MAX_BYTES:
+            return False
         with open(path, "rb") as fh:
             head = fh.read(200)
     except OSError:
-        return None
+        return False
     if b"\x00" in head:
-        return None                                   # бинарник, не скрипт
+        return False                                  # бинарник, не скрипт
     first = head.split(b"\n", 1)[0].decode("utf-8", "replace")
-    if (cmd.argv0 in cmdparse.SHELLS or cmd.argv0 in ("source", ".")
-            or path.endswith(SCRIPT_SUFFIXES) or SCRIPT_SHEBANG_RE.match(first)):
-        return path
-    return None
+    return (cmd.argv0 in cmdparse.SHELLS or cmd.argv0 in ("source", ".", "cat")
+            or path.endswith(SCRIPT_SUFFIXES) or bool(SCRIPT_SHEBANG_RE.match(first)))
 
 
 def script_commands(cmds, cwd):
     """Команды из файлов скриптов, которые запускает командная строка.
 
-    Один уровень вглубь: скрипт, вызывающий скрипт, дальше не раскрывается —
-    бюджет PreToolUse важнее полноты, а первый уровень закрывает типовой
-    случай «агент написал скрипт и запустил его».
+    Возвращает (команды, неразрешённые запуски). До трёх уровней вглубь
+    (скрипт, вызывающий скрипт, …) с общим лимитом объёма. Неразрешённый
+    запуск — скрипт, которого ещё нет, но та же строка его скачивает,
+    распаковывает или копирует: проверить нечего, пропускать нельзя.
     """
-    extra = []
-    seen = set()
-    for cmd in cmds:
-        path = script_path(cmd, cwd)
-        if not path or path in seen:
-            continue
-        seen.add(path)
-        try:
-            with open(path, "r", encoding="utf-8", errors="replace") as fh:
-                text = fh.read(SCRIPT_MAX_BYTES)
-        except OSError:
-            continue
-        inner, _warnings = cmdparse.parse(text)
-        label = os.path.relpath(path, cwd) if cwd else path
-        for c in inner:
-            extra.append(dataclasses.replace(
-                c, origin=cmdparse.SCRIPT, depth=c.depth + 1,
-                raw="{}: {}".format(label, c.raw)))
-    return extra
+    extra, unresolved = [], []
+    seen, budget = set(), [SCRIPT_TOTAL_BYTES]
+    written = {os.path.basename(target) for _, target in cmdparse.heredoc_scripts(cmds)}
+    producer = any(c.argv0 in PRODUCERS for c in cmds)
+
+    def visit(batch, level):
+        for cmd in batch:
+            found, missing = script_candidates(cmd, cwd, batch)
+            if producer and cmd.origin != cmdparse.SCRIPT:
+                unresolved.extend(m for m in missing
+                                  if os.path.basename(m) not in written)
+            for path in found:
+                if path in seen or budget[0] <= 0:
+                    continue
+                seen.add(path)
+                try:
+                    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                        text = fh.read(min(SCRIPT_MAX_BYTES, budget[0]))
+                except OSError:
+                    continue
+                budget[0] -= len(text)
+                inner, _warnings = cmdparse.parse(text, script_dir=os.path.dirname(path))
+                label = os.path.relpath(path, cwd) if cwd else path
+                nested = [dataclasses.replace(
+                    c, origin=cmdparse.SCRIPT, depth=c.depth + level,
+                    raw="{}: {}".format(label, c.raw)) for c in inner]
+                extra.extend(nested)
+                if level < SCRIPT_MAX_LEVELS:
+                    visit(nested, level + 1)
+
+    visit(cmds, 1)
+    return extra, unresolved
 
 
 def _is_root_target(raw, expanded, cwd):
@@ -182,6 +319,7 @@ def collect_matches(command, cmds, cwd):
     """Все сработавшие правила: (rule, cmd_или_None, target)."""
     rules = ruleset.load("commands") + _extra_rules()
     matches = []
+    contexts = {}
 
     for rule in rules:
         kind = rule["match"]["kind"]
@@ -189,20 +327,24 @@ def collect_matches(command, cmds, cwd):
             # Правила по сырому тексту нужны там, где конструкция не является
             # командой в смысле argv0 — форк-бомба, работа с историей шелла.
             if ruleset.match_regex(command, rule):
-                matches.append((rule, None, None))
+                matches.append((rule, None, None, None))
             continue
         if kind != "command":
             continue
         dest_rule = any(k.startswith("dest_") for k in rule["match"])
-        for cmd in cmds:
-            ctx = build_context(cmd, cwd)
+        for index, cmd in enumerate(cmds):
+            # Контекст считается один раз на команду, а не на каждую пару
+            # правило × команда: realpath операндов — самая дорогая часть.
+            ctx = contexts.get(index)
+            if ctx is None:
+                ctx = contexts[index] = build_context(cmd, cwd)
             if ruleset.match_command(cmd, rule, ctx):
                 if dest_rule and ctx.get("dest"):
                     target = ctx["dest"]
                 else:
                     target = (cmd.operands[0] if cmd.operands
                               else (cmd.redirects[0] if cmd.redirects else cmd.argv0))
-                matches.append((rule, cmd, target))
+                matches.append((rule, cmd, target, ctx.get("exempt_targets")))
                 break            # одного срабатывания правила достаточно
     return matches
 
@@ -211,7 +353,7 @@ def _extra_rules():
     """Локальные правила сотрудника: только запрещающие, только добавляют."""
     out = []
     for rule in (config.extra_rules() or []):
-        if rule.get("match", {}).get("kind") not in ("command", "regex"):
+        if rule.get("match", {}).get("kind") != "command":
             continue
         prepared = ruleset._prepare(rule)
         if prepared is not None:
@@ -224,9 +366,10 @@ def decide(matches, session_id, agent_id):
     order = {policy.DENY: 3, policy.ASK: 2, policy.WARN: 1, policy.LOG: 0}
     best = None
     resolutions = []
-    for rule, cmd, target in matches:
+    for rule, cmd, target, exempt_targets in matches:
         resolution = policy.resolve(rule, target=target, agent_id=agent_id,
-                                    session_id=session_id)
+                                    session_id=session_id,
+                                    exempt_targets=exempt_targets)
         resolution["cmd"] = cmd
         resolution["target"] = target
         resolutions.append(resolution)
@@ -238,7 +381,62 @@ def decide(matches, session_id, agent_id):
     return best, resolutions
 
 
-@hookio.guard(hookio.FAIL_CLOSED, HOOK)
+# Команды, выводящие данные в сеть. В «запятнанной» инъекцией сессии каждая
+# такая команда с внешним адресом уходит в ask.
+_EGRESS_ARGV0 = {"curl", "wget", "nc", "ncat", "socat", "scp", "sftp", "ssh",
+                 "rsync", "ftp", "telnet", "http", "httpie"}
+_EXTERNAL_RE = re.compile(r"https?://|ftp://|@[\w.-]+:|[\w.-]+\.[a-z]{2,}")
+
+
+def _tainted_egress(data, command):
+    """В сессии, помеченной инъекцией, команда отправки данных наружу → ask."""
+    sid = data.get("session_id")
+    if not sid:
+        return False
+    try:
+        if not policy.state_get(sid, "injection_tainted"):
+            return False
+        cmds, _ = cmdparse.parse(command)
+    except Exception:
+        return False
+    for cmd in cmds:
+        if cmd.argv0 in _EGRESS_ARGV0:
+            joined = " ".join(cmd.args)
+            if _EXTERNAL_RE.search(joined) and "localhost" not in joined:
+                return True
+    return False
+
+
+def _ask_tainted(data, command):
+    audit.write({
+        "hook": HOOK, "rule": "INJECTION_TAINTED_EGRESS", "class": "injection",
+        "severity": "MEDIUM", "level": config.level(), "action": "asked",
+        "target": None, "evidence": command[:512],
+        "latency_ms": hookio.elapsed_ms(),
+    }, data)
+    hookio.ask("PreToolUse",
+               "secure-dev: ранее в этой сессии в прочитанном содержимом найдены "
+               "внедрённые инструкции, а эта команда отправляет данные наружу. "
+               "Подтвердите, если отправка ожидаема.")
+
+
+def _ask_unparsed(data, command, why):
+    audit.write({
+        "hook": HOOK, "rule": "PARSER_UNRESOLVED", "class": "internal",
+        "severity": "MEDIUM", "level": config.level(), "action": "asked",
+        "target": why, "evidence": command[:2048],
+        "latency_ms": hookio.elapsed_ms(),
+    }, data)
+    if why == "command_too_long":
+        hookio.ask("PreToolUse",
+                   "secure-dev: команда слишком длинная для надёжной проверки. "
+                   "Подтвердите, если она ожидаема, либо разбейте её на части.")
+    hookio.ask("PreToolUse",
+               "secure-dev: команда собирается динамически, статически "
+               "проверить её невозможно. Подтвердите, если она ожидаема.")
+
+
+@hookio.guard(hookio.FAIL_CLOSED, HOOK, default_event="PreToolUse")
 def main():
     data = hookio.read()
     if data.get("hook_event_name") != "PreToolUse":
@@ -254,13 +452,35 @@ def main():
     session_id = data.get("session_id")
     agent_id = data.get("agent_id")
 
+    if len(command) > MAX_COMMAND_BYTES:
+        _ask_unparsed(data, command, "command_too_long")
+
+    if _tainted_egress(data, command):
+        _ask_tainted(data, command)
+
     cmds, warnings = cmdparse.parse(command)
     # Предупреждения парсера из файлов скриптов не эскалируются: в любом
     # install.sh полно `$CMD "$@"`, и ask на каждый такой запуск — ложное
     # срабатывание. Правила по разобранным командам скрипта действуют в полную
     # силу, а всё динамическое в НАЗНАЧЕНИИ синхронизации ловит dest_dynamic.
-    cmds = cmds + script_commands(cmds, cwd)
-    matches = collect_matches(command, cmds, cwd)
+    file_cmds, unresolved_scripts = script_commands(cmds, cwd)
+    if unresolved_scripts:
+        warnings = warnings + ["script_unresolved"]
+    if "shell_stdin_unresolved" in warnings and any(
+            c.shell_stdin and c.upstream and script_candidates(c, cwd, cmds)[0]
+            for c in cmds):
+        # `cat x.sh | bash`: файл прочитан и проверен как скрипт.
+        warnings = [w for w in warnings if w != "shell_stdin_unresolved"]
+    cmds = cmds + file_cmds
+    # Тела heredoc, ушедшие в файл, — данные: правила по сырому тексту их не
+    # видят. Запись shell-скрипта данными не считается; heredoc внутри
+    # запускаемого файла скрипта подчиняется тем же условиям.
+    scripts = cmdparse.heredoc_scripts(cmds)
+    code = cmdparse.code_text(command, cmds, also_code=[h for h, _ in scripts])
+    if len(code) > MAX_CODE_BYTES:
+        warnings = warnings + ["command_too_long"]
+    cmds = cmds + cmdparse.heredoc_script_commands(scripts)
+    matches = collect_matches(code, cmds, cwd)
     best, resolutions = decide(matches, session_id, agent_id)
 
     for resolution in resolutions[:MAX_AUDIT_RECORDS]:
@@ -291,16 +511,12 @@ def main():
     # настроен плагин.
     unresolved = [w for w in warnings
                   if w in ESCALATING_WARNINGS or w.startswith("parse_error")]
-    if unresolved and (best is None or best["decision"] in (policy.LOG, policy.WARN)):
-        audit.write({
-            "hook": HOOK, "rule": "PARSER_UNRESOLVED", "class": "internal",
-            "severity": "MEDIUM", "level": config.level(), "action": "asked",
-            "target": None, "evidence": command,
-            "latency_ms": hookio.elapsed_ms(),
-        }, data)
-        hookio.ask("PreToolUse",
-                   "secure-dev: команда собирается динамически, статически "
-                   "проверить её невозможно. Подтвердите, если она ожидаема.")
+    # Смотрим на ДЕЙСТВУЮЩЕЕ решение: подавленное памятью сессии или снятое
+    # исключением правило не должно заодно гасить эскалацию неразобранного.
+    effective = (policy.LOG if best is None or best["suppressed"]
+                 or best["exempt"] is not None else best["decision"])
+    if unresolved and effective in (policy.LOG, policy.WARN):
+        _ask_unparsed(data, command, unresolved[0])
 
     if best is None or best["exempt"] is not None or best["suppressed"]:
         hookio.passthrough()

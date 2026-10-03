@@ -18,8 +18,15 @@ tool_input/tool_response, то есть ровно те секреты, кото
 import json
 import os
 import shutil
+import urllib.request
 
 from lib import audit
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Опенер без переходов: любой redirect → ошибка, а не follow (S5)."""
+    def redirect_request(self, *a, **kw):
+        return None
 
 HTTP_TIMEOUT_S = 10
 HTTP_RETRIES = 2
@@ -205,7 +212,19 @@ def _http_send(records, cfg):
     if not url:
         return ExportResult(False, 0, len(records), "audit.export.url не задан")
 
+    import urllib.parse
     import urllib.request
+
+    # Только https: журнал содержит cwd, команды и метаданные операций;
+    # отправлять их по http (открытым текстом) или file:// нельзя (S5).
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "https":
+        return ExportResult(False, 0, len(records),
+                            "audit.export.url должен быть https://")
+    allowed = cfg.get("allowed_hosts")
+    if allowed and parsed.hostname not in allowed:
+        return ExportResult(False, 0, len(records),
+                            "хост {} не в allowed_hosts".format(parsed.hostname))
 
     payload = json.dumps({"records": records}, ensure_ascii=False).encode("utf-8")
     headers = {"Content-Type": "application/json"}
@@ -213,19 +232,26 @@ def _http_send(records, cfg):
     if token_env:
         # В политике хранится ИМЯ переменной, а не токен: policy.json лежит в
         # git, и секрет в нём был бы ровно той утечкой, которую плагин ловит.
-        token = os.environ.get(token_env)
+        # Имя ограничено allowlist: иначе подменой policy.json токен можно было
+        # бы увести из любой переменной (например, ключа API) — аудит S5.
+        name_ok = token_env in (cfg.get("token_env_allow")
+                                or ["SECURE_DEV_EXPORT_TOKEN"])
+        token = os.environ.get(token_env) if name_ok else None
         if token:
             headers["Authorization"] = "Bearer " + token
 
+    # Редиректы запрещены: перенаправление увело бы заголовок Authorization и
+    # данные аудита мимо allowed_hosts.
+    opener = urllib.request.build_opener(_NoRedirect())
     last = None
     for _ in range(HTTP_RETRIES + 1):
         request = urllib.request.Request(url, data=payload, headers=headers,
                                          method="POST")
         try:
-            with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_S) as resp:
+            with opener.open(request, timeout=HTTP_TIMEOUT_S) as resp:
                 if 200 <= resp.status < 300:
                     return ExportResult(True, len(records), 0, None)
                 last = "HTTP {}".format(resp.status)
-        except Exception as exc:                 # сеть, TLS, таймаут
+        except Exception as exc:                 # сеть, TLS, таймаут, редирект
             last = type(exc).__name__
     return ExportResult(False, 0, len(records), last or "http error")

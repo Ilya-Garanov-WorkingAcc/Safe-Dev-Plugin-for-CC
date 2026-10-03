@@ -144,14 +144,14 @@ random.seed(20260727)
 alphabet = list(string.printable[:95]) + ["$(", "`", "&&", "||", "|", ";", "\\",
                                           "'", '"', ">>", "<<", "${", "}"]
 crashed = []
-t0 = time.time()
+t0 = time.monotonic()
 for _ in range(10000):
     text = "".join(random.choice(alphabet) for _ in range(random.randint(1, 60)))
     try:
         cp.parse(text)
     except Exception as exc:                                    # noqa: BLE001
         crashed.append((type(exc).__name__, text))
-elapsed = time.time() - t0
+elapsed = time.monotonic() - t0
 check("10 000 случайных строк без исключений", not crashed,
       "{} падений, {:.1f}s".format(len(crashed), elapsed))
 if crashed:
@@ -239,12 +239,100 @@ check("вложенный if внутри function — then не глотает 
       bool(find("bash -c 'f(){ if true; then rm -rf /; fi; }; f'", "rm")))
 check("coproc раскрыт", bool(find("coproc bash -c 'rm -rf /'", "rm")))
 
+print("=== F: heredoc ===")
+
+cmds, warns = cp.parse("cat > a.md <<'EOF'\n$X y | z\nrm -rf /\nEOF\nls -la")
+check("данные: тело не становится командами",
+      [c.argv0 for c in cmds] == ["cat", "ls"] and not warns,
+      str([c.argv0 for c in cmds]) + str(warns))
+cat = cmds[0]
+check("данные: Heredoc на команде",
+      len(cat.heredocs) == 1 and cat.heredocs[0].kind == cp.HEREDOC_DATA
+      and cat.heredocs[0].body == "$X y | z\nrm -rf /\n"
+      and cat.heredocs[0].quoted and cat.heredocs[0].target == "a.md",
+      str(cat.heredocs))
+check("данные: цель редиректа сохранена, <<EOF не операнд",
+      cat.redirects == ("a.md",) and cat.operands == (), str(cat))
+
+command = "cat > a.md <<'EOF'\nhistory -c\nf() { rm -rf /; }\nEOF\nls"
+cmds, _ = cp.parse(command)
+check("code_text вырезает тело-данные",
+      cp.code_text(command, cmds) == "cat > a.md <<'EOF'\nEOF\nls",
+      repr(cp.code_text(command, cmds)))
+check("определение функции в теле-данных не раскрывается",
+      not [c for c in cmds if c.argv0 == "rm"])
+
+cmds, warns = cp.parse("cat > a.md <<EOF\nтекст $(rm -rf /) и `sudo ls`\nEOF")
+check("без кавычек: разбираются только подстановки",
+      sorted(c.argv0 for c in cmds) == ["cat", "ls", "rm", "sudo"],
+      str([c.argv0 for c in cmds]))
+cmds, _ = cp.parse("cat > a.md <<'EOF'\nтекст $(rm -rf /)\nEOF")
+check("в кавычках: подстановки — текст", [c.argv0 for c in cmds] == ["cat"])
+
+for label, command in [
+        ("bash",                "bash <<'EOF'\nrm -rf /\nEOF"),
+        ("cat без редиректа",   "cat <<'EOF'\nrm -rf /\nEOF"),
+        ("cat | bash",          "cat <<'EOF' | bash\nrm -rf /\nEOF"),
+        ("tee без > файла",     "tee a.md <<'EOF'\nrm -rf /\nEOF"),
+        ("stdout → fd",         "cat >&2 <<'EOF'\nrm -rf /\nEOF"),
+        ("цель /dev/stdout",    "cat > /dev/stdout <<'EOF'\nrm -rf /\nEOF"),
+        ("цель из переменной",  "cat > $OUT <<'EOF'\nrm -rf /\nEOF"),
+        ("через sudo",          "sudo cat > a <<'EOF'\nrm -rf /\nEOF"),
+        ("без команды",         "<<'EOF'\nrm -rf /\nEOF"),
+        ("алиас",               "alias c=bash; c <<'EOF'\nrm -rf /\nEOF"),
+        ("арифметика",          "((cat > a <<EOF))\nrm -rf /\nEOF"),
+        ("комментарий",         "cat > a # <<'EOF'\nrm -rf /\nEOF"),
+        ("here-string",         "cat > a <<<'EOF'\nrm -rf /\nEOF")]:
+    check("код: {}".format(label), bool(find(command, "rm")), str(argv0s(command)))
+
+_, warns = cp.parse("cat > a.md <<'EOF'\nrm -rf /")
+check("нет разделителя → heredoc_unresolved + тело разобрано",
+      "heredoc_unresolved" in warns
+      and bool(find("cat > a.md <<'EOF'\nrm -rf /", "rm")), str(warns))
+_, warns = cp.parse("echo $((1 << 2)) && x=$((y<<3))")
+check("сдвиг в арифметике — не heredoc", "heredoc_unresolved" not in warns, str(warns))
+cmds, warns = cp.parse("cat > a <<'EOF'\nтекст\nEOF \nrm -rf /\nEOF")
+check("разделитель с хвостовым пробелом не закрывает",
+      [c.argv0 for c in cmds] == ["cat"] and not warns, str([c.argv0 for c in cmds]))
+cmds, _ = cp.parse("cat > a <<-EOF\n\tтекст\n\tEOF\nls")
+check("<<- снимает табы у разделителя", [c.argv0 for c in cmds] == ["cat", "ls"],
+      str([c.argv0 for c in cmds]))
+cmds, _ = cp.parse("cat > a <<'A' && bash <<'B'\nrm -rf /\nA\nsudo ls\nB")
+check("два heredoc на строке: тела по порядку",
+      [c.argv0 for c in cmds] == ["cat", "bash", "sudo", "ls"],
+      str([c.argv0 for c in cmds]))
+
+cmds, warns = cp.parse("python3 - <<'PY'\nimport os\nos.system('rm -rf /')\nPY")
+check("интерпретатор: как python -c",
+      "interpreter_exec" in warns and any(c.argv0 == "rm" for c in cmds)
+      and cmds[0].heredocs[0].kind == cp.HEREDOC_INTERP, str(warns))
+cmds, warns = cp.parse("python3 - <<'PY'\nimport json\nfor x in data: print(x)\nPY")
+check("интерпретатор без запуска команд — чисто",
+      [c.argv0 for c in cmds] == ["python3"] and not warns,
+      str([c.argv0 for c in cmds]) + str(warns))
+
+rng = random.Random(20261003)
+crashed = []
+for _ in range(5000):
+    sample = "".join(rng.choice(["<<", "<<-", "<<<", "'", '"', "EOF", "\n", "\t",
+                                 " ", "$(", ")", "((", "`", "|", ";", "#", "\\",
+                                 "cat", ">", "f", "bash", "$X"])
+                     for _ in range(rng.randint(1, 30)))
+    _, warns = cp.parse(sample)
+    if any(w.startswith("parse_error") or w == "recursion_limit" for w in warns):
+        crashed.append((sample, warns))
+check("фазз по алфавиту heredoc: парсер не падает", not crashed, str(crashed[:2]))
+
+cmds, warns = cp.parse("cat > t.md <<'EOF'\n" + "| a | b | c | d |\n" * 200 + "EOF")
+check("большая таблица — одна команда", len(cmds) == 1 and not warns,
+      "{} {}".format(len(cmds), warns))
+
 print("=== E: бюджет (TS.md §1.3) ===")
 sample = "git status && npm run build | tee /tmp/log ; docker compose up -d"
-t0 = time.time()
+t0 = time.monotonic()
 for _ in range(200):
     cp.parse(sample)
-per_call_ms = (time.time() - t0) / 200 * 1000
+per_call_ms = (time.monotonic() - t0) / 200 * 1000
 check("разбор типичной команды < 5 мс", per_call_ms < 5.0,
       "{:.2f} мс".format(per_call_ms))
 

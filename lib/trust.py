@@ -18,6 +18,7 @@ CLI: `secure-dev scan` работает ДО запуска claude и являе
 import fnmatch
 import hashlib
 import os
+import re
 
 from lib import audit, injection, ruleset
 
@@ -28,6 +29,10 @@ ARTIFACT_FILES = (
     ".mcp.json",
     "CLAUDE.md",
     ".claude/CLAUDE.md",
+    "CLAUDE.local.md",
+    "AGENTS.md",
+    ".envrc",
+    ".git/config",
 )
 ARTIFACT_DIRS = (
     ".claude/hooks/",
@@ -35,14 +40,23 @@ ARTIFACT_DIRS = (
     ".claude/skills/",
     ".claude/rules/",
     ".claude/commands/",
+    ".claude/output-styles/",
 )
+# Каталоги, которые считаются исполняемой конфигурацией и показываются как
+# находка при первом клоне (аудит 03.10.2026, R2): раньше skills/rules попадали
+# только в хеш и не влияли на решение trusted/pending.
+FINDING_DIRS = (".claude/hooks/", ".claude/agents/", ".claude/commands/",
+                ".claude/skills/", ".claude/rules/", ".claude/output-styles/")
 
 STATUS_TRUSTED = "trusted"
 STATUS_PENDING = "pending"
 STATUS_QUARANTINED = "quarantined"
 
-MAX_DIR_FILES = 500          # защита от каталога-бомбы в чужом репозитории
+MAX_DIR_FILES = 2000         # защита от каталога-бомбы в чужом репозитории
 MAX_FILE_BYTES = 2 * 1024 * 1024
+# Опасные ключи git-конфигурации: исполняют команду при обычных операциях.
+GIT_EXEC_KEYS = ("core.fsmonitor", "core.hookspath", "core.sshcommand",
+                 "core.pager", "core.editor", "core.askpass")
 
 
 # --- Идентификация репозитория ---------------------------------------------
@@ -62,7 +76,10 @@ def repo_id(root):
     """
     remote = audit.normalize_remote(
         audit._git(root, "remote", "get-url", "origin"))
-    source = remote or os.path.realpath(root)
+    # В ключ входит и realpath корня: иначе репозиторий с подставным origin
+    # попадал бы в чужой слепок, а два worktree одного remote затирали бы
+    # слепок друг другу.
+    source = "{}|{}".format(remote or "-", os.path.realpath(root))
     return hashlib.sha256(source.encode("utf-8")).hexdigest()[:16], remote
 
 
@@ -105,7 +122,10 @@ def _sha256_dir(path):
                 entries.append("{}:{}".format(rel, digest))
             count += 1
             if count >= MAX_DIR_FILES:
-                entries.append("truncated")
+                # Каталог-бомба: хеш считается по тому, что успели пройти, но
+                # факт усечения фиксируется — изменение за границей всё равно
+                # меняет итоговый хеш через маркер с числом файлов.
+                entries.append("truncated:{}".format(count))
                 break
         if count >= MAX_DIR_FILES:
             break
@@ -227,13 +247,69 @@ def hot_findings(root):
             reported.add(root_key)
             findings.append({"file": rel, "key": root_key,
                              "detail": _executables(value)})
-    for rel in (".claude/hooks/", ".claude/agents/", ".claude/commands/"):
+    for rel in FINDING_DIRS:
         full = os.path.join(root, rel.rstrip("/"))
         if os.path.isdir(full) and os.listdir(full):
             findings.append({"file": rel, "key": rel.rstrip("/"),
-                             "detail": sorted(os.listdir(full))[:20]})
+                             "detail": _executable_bits(full)})
     findings.extend(_claude_md_findings(root))
+    findings.extend(_git_config_findings(root))
+    findings.extend(_git_hooks_findings(root))
     return findings
+def _git_hooks_findings(root):
+    """Исполняемые git-хуки (не образцы *.sample) — запускаются на git-операциях."""
+    d = os.path.join(root, ".git", "hooks")
+    if not os.path.isdir(d):
+        return []
+    real = [n for n in sorted(os.listdir(d)) if not n.endswith(".sample")]
+    if not real:
+        return []
+    return [{"file": ".git/hooks/", "key": ".git/hooks", "detail": real[:20]}]
+
+
+def _executable_bits(dir_path):
+    """Для каталогов skills/commands/agents: имена файлов плюс признаки
+    исполняемости внутри — `allowed-tools` во frontmatter и `!`-блоки bash в
+    slash-командах. Отчёт без этого не давал основания судить (R2)."""
+    detail, count = [], 0
+    for base, dirs, files in os.walk(dir_path):
+        dirs.sort()
+        for name in sorted(files):
+            if count >= 40:
+                return detail
+            count += 1
+            full = os.path.join(base, name)
+            rel = os.path.relpath(full, dir_path)
+            tags = []
+            try:
+                with open(full, "r", encoding="utf-8", errors="replace") as fh:
+                    text = fh.read(8192)
+            except OSError:
+                text = ""
+            if re.search(r"(?mi)^allowed-tools\s*:", text):
+                tags.append("allowed-tools")
+            if re.search(r"(?m)^\s*!`", text) or "$(" in text or "`" in text:
+                tags.append("!bash")
+            detail.append(rel + ((" [" + ",".join(tags) + "]") if tags else ""))
+    return detail
+
+
+def _git_config_findings(root):
+    """Опасные ключи .git/config, исполняющие команды (core.fsmonitor и т.п.)."""
+    path = os.path.join(root, ".git", "config")
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read(MAX_FILE_BYTES).lower()
+    except OSError:
+        return []
+    hits = [k for k in GIT_EXEC_KEYS if k.split(".")[1] in text and k.split(".")[0] in text]
+    if "[filter " in text or "textconv" in text or re.search(r"=\s*!", text):
+        hits.append("alias/filter с командой")
+    if not hits:
+        return []
+    return [{"file": ".git/config", "key": "git-exec", "detail": hits[:10]}]
 
 
 def _claude_md_findings(root):
@@ -285,8 +361,9 @@ def evaluate(path):
 
     if baseline is None:
         if not findings:
-            # Чистый репозиторий: молча доверяем и запоминаем слепок, иначе
-            # каждая сессия в обычном проекте начиналась бы с вопроса.
+            # Репозиторий без исполняемой конфигурации: доверять нечему, слепок
+            # запоминается молча. Баннер покажет «конфигурации нет», а не
+            # «доверенный» (аудит 03.10.2026, R2) — различие в has_config.
             status, changed = STATUS_TRUSTED, []
         else:
             status, changed = STATUS_PENDING, sorted(
@@ -307,7 +384,9 @@ def evaluate(path):
         "baseline": baseline,
         "status": status,
         "changed": changed,
-        "has_config": any(v != "absent" for v in artifacts.values()),
+        "has_config": bool(findings) or any(
+            v != "absent" for k, v in artifacts.items()
+            if not k.startswith(".git/")),
     }
 
 

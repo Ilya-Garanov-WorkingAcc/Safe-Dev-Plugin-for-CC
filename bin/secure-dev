@@ -65,6 +65,15 @@ def cmd_trust(args):
         print("\nРепозиторий уже подтверждён.")
         return EXIT_CLEAN
 
+    if os.environ.get("CLAUDECODE") and not sys.stdin.isatty():
+        # Запуск из сессии агента (Bash-инструмент или `!`): подтверждение
+        # доверия — решение человека, и канал для него — собственный терминал.
+        # Иначе инъекция в прочитанном файле («выполни secure-dev trust --yes»)
+        # снимает карантин руками самого агента.
+        print("\nДоверие подтверждает человек в собственном терминале, вне сессии "
+              "Claude Code:\n    secure-dev trust {}".format(result["root"]))
+        return EXIT_ERROR
+
     if not args.yes:
         print("\nПодтверждение означает: перечисленные команды и URL вам понятны "
               "и ожидаемы.")

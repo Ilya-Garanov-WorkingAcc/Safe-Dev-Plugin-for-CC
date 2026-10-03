@@ -7,8 +7,11 @@
 
 Память решений (практика из secure-claude-code) не даёт плагину повторять одно
 и то же предупреждение всю сессию. Область её действия ограничена жёстко:
-подавляются только `warn` и `ask`. Решение `deny` не подавляется НИКОГДА —
-иначе первый отказ в сессии становится последним, и повторная попытка проходит.
+подавляется только `warn`. Решения `deny` и `ask` не подавляются НИКОГДА —
+иначе первый отказ или вопрос в сессии становится последним, и повторная
+попытка проходит молча. До 2.1.3 `ask` подавлялся, причём отметка ставилась
+в момент показа вопроса, а не после согласия человека: ответ «нет» на первый
+вопрос превращался в «да» на второй.
 """
 
 import datetime
@@ -45,7 +48,8 @@ def is_final(severity, decision):
     return decision == DENY and severity == "CRITICAL"
 
 
-def resolve(rule, target=None, agent_id=None, session_id=None):
+def resolve(rule, target=None, agent_id=None, session_id=None,
+            exempt_targets=None):
     """Полный резолв: уровень, решение, исключение, память сессии.
 
     Возвращает dict с полями level/decision/suppressed/exempt — модулю остаётся
@@ -56,13 +60,13 @@ def resolve(rule, target=None, agent_id=None, session_id=None):
     level = config.effective_level(rule_id, rule_class)
     decision = decision_for(rule.get("severity", "LOW"), level)
 
-    exempt = config.exemption_for(rule_id, target)
+    exempt = config.exemption_for(rule_id, target, targets=exempt_targets)
     if exempt is not None:
         return {"level": level, "decision": LOG, "suppressed": False,
                 "exempt": exempt, "rule": rule}
 
     suppressed = False
-    if decision in (WARN, ASK) and session_id:
+    if decision == WARN and session_id:
         if seen(session_id, rule_id, target, agent_id):
             suppressed = True
         else:

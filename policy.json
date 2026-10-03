@@ -8,6 +8,7 @@
     "secret-egress": "strict",
     "secret-output": "strict",
     "config-trust": "strict",
+    "self-protection": "strict",
     "privilege": "strict",
     "command-destructive": "strict",
     "git-destructive": "strict",

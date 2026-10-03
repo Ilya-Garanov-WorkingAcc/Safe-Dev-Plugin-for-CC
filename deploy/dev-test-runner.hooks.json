@@ -1,0 +1,26 @@
+{
+  "_readme": "Мета-хук разработчика: после правки файла в каталоге хуков запускает его батарею (<name>.tests.py|sh|js). НЕ включён в hooks/hooks.json намеренно (аудит 03.10.2026, S2): он исполняет файл, который агент только что записал, в обход command_guard. Поэтому включается вручную и только на машине разработчика хуков.",
+  "_scope": "Батареи запускаются только из каталогов-корней: каталог плагина и ~/.claude/hooks. Другие корни добавляются переменной окружения SECURE_DEV_TEST_RUNNER_ROOTS (пути через ':'), заданной в окружении, из которого стартует claude. Каталог .claude/hooks чужого репозитория в корни не входит.",
+  "_how_to_enable": [
+    "1. Влить блок hooks.PostToolUse из этого файла в ~/.claude/settings.json",
+    "2. Заменить ${CLAUDE_PLUGIN_ROOT} на путь к установленному плагину",
+    "3. При работе над хуками вне каталога плагина — задать SECURE_DEV_TEST_RUNNER_ROOTS"
+  ],
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/hook_test_runner.py"
+            ],
+            "timeout": 150
+          }
+        ]
+      }
+    ]
+  }
+}

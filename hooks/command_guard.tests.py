@@ -196,9 +196,9 @@ check("нет полей с содержимым диалога",
 print("=== K: бюджет PreToolUse (TS.md §1.3) ===")
 samples = []
 for command in bypass_corpus.LEGITIMATE[:60]:
-    t0 = time.time()
+    t0 = time.monotonic()
     run(command)
-    samples.append((time.time() - t0) * 1000)
+    samples.append((time.monotonic() - t0) * 1000)
 samples.sort()
 p50 = samples[len(samples) // 2]
 p95 = samples[min(int(len(samples) * 0.95), len(samples) - 1)]
@@ -303,6 +303,109 @@ check("безобидный скрипт проходит", not blocked(run("bas
       str(decision(run("bash deploy/benign.sh"))))
 check("несуществующий скрипт не роняет хук",
       not blocked(run("bash deploy/missing.sh")))
+
+print("=== R: heredoc — запись текста не мешает ({} шт.) ===".format(
+    len(bypass_corpus.HEREDOC_OK)))
+os.makedirs(os.path.join(WORKDIR, "docs"), exist_ok=True)
+false_positives = []
+for label, command in bypass_corpus.HEREDOC_OK:
+    result = run(command)
+    if blocked(result):
+        false_positives.append("{} -> {}".format(label, decision(result)))
+check("ни deny, ни ask", not false_positives, "; ".join(false_positives[:4]))
+for item in false_positives:
+    print("      FP:", item)
+
+print("=== S: heredoc — тело-код и недоказуемые случаи ({} шт.) ===".format(
+    len(bypass_corpus.HEREDOC_BLOCK)))
+missed = []
+for label, command in bypass_corpus.HEREDOC_BLOCK:
+    if not blocked(run(command)):
+        missed.append(label)
+check("все заблокированы", not missed, str(missed))
+for item in missed:
+    print("      MISS:", item)
+for label, command in [
+        ("bash <<EOF",          "bash <<'EOF'\nrm -rf /\nEOF"),
+        ("запись .sh",          "cat > run.sh <<'EOF'\nrm -rf /\nEOF"),
+        ("записал и запустил",  "cat > run <<'EOF'\nrm -rf /\nEOF\nbash run"),
+        ("подстановка в теле",  "cat > a.md <<EOF\n$(rm -rf /)\nEOF")]:
+    check("heredoc: {} → deny".format(label), decision(run(command)) == "deny",
+          str(decision(run(command))))
+reason = (run("cat > run.sh <<'EOF'\nrm -rf /\nEOF").get("hookSpecificOutput")
+          or {}).get("permissionDecisionReason", "")
+check("отказ называет файл из heredoc", "run.sh" in reason, reason[-80:])
+check("скрипт с $CMD в теле не эскалируется",
+      not blocked(run("cat > build.sh <<'EOF'\n#!/bin/sh\n$CC -o app main.c\nEOF")),
+      str(decision(run("cat > build.sh <<'EOF'\n#!/bin/sh\n$CC -o app main.c\nEOF"))))
+
+print("=== T: аудит 03.10.2026, фаза 0 ===")
+_counter[0] += 1
+SID = "phase0-{}".format(_counter[0])
+
+
+def run_sid(command):
+    """Несколько вызовов в ОДНОЙ сессии — для проверки памяти сессии."""
+    payload = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+               "session_id": SID, "cwd": WORKDIR, "tool_input": {"command": command}}
+    old_in, old_out = sys.stdin, sys.stdout
+    sys.stdin = io.StringIO(json.dumps(payload))
+    sys.stdout = io.StringIO()
+    try:
+        cg.main()
+    except SystemExit:
+        pass
+    finally:
+        text = sys.stdout.getvalue().strip()
+        sys.stdin, sys.stdout = old_in, old_out
+    return json.loads(text) if text else {}
+
+
+first = decision(run_sid("git branch -D feature/x"))
+second = decision(run_sid("git branch -D feature/x"))
+check("ask не подавляется памятью сессии (L1)",
+      first == "ask" and second == "ask", "{} / {}".format(first, second))
+check("повторный ask не гасит эскалацию неразобранного",
+      blocked(run_sid("git branch -D feature/x; $X")))
+
+for label, command in [
+        ("второй операнд вне исключения", "rm -rf /tmp/a/node_modules/x /tmp/zz-victim"),
+        ("выход через ..",                "rm -rf /tmp/node_modules/../zz-victim"),
+        ("переменная в операнде",         "rm -rf /tmp/a/node_modules/$X")]:
+    check("исключение node_modules: {} → блок (L2)".format(label),
+          blocked(run(command)), str(decision(run(command))))
+check("исключение node_modules по-прежнему действует",
+      not blocked(run("rm -rf /tmp/a/node_modules/x /tmp/b/node_modules/y")),
+      str(decision(run("rm -rf /tmp/a/node_modules/x /tmp/b/node_modules/y"))))
+
+for label, command in [
+        ("прямой вызов",   "secure-dev trust . --yes"),
+        ("по пути",        "/opt/x/bin/secure-dev trust -y"),
+        ("через python",   "python3 bin/secure-dev trust . --yes"),
+        ("через env",      "env -u CLAUDECODE secure-dev trust . --yes"),
+        ("с присваиванием", "CLAUDECODE= secure-dev trust . --yes")]:
+    check("самоподтверждение доверия: {} → deny (R1)".format(label),
+          decision(run(command)) == "deny", str(decision(run(command))))
+check("secure-dev scan не затронут", not blocked(run("secure-dev scan .")))
+
+check("код длиннее 16 КБ → ask",
+      decision(run("echo " + "word " * 4000)) == "ask",
+      str(decision(run("echo " + "word " * 4000))))
+check("документ 300 КБ через heredoc — не «слишком длинная команда»",
+      not blocked(run("cat > big.md <<'EOF'\n" + "| a | b | c |\n" * 23000 + "EOF")))
+check("команда длиннее 512 КБ → ask без разбора",
+      decision(run("echo " + "ab " * 200000)) == "ask")
+
+started = time.monotonic()
+proc = subprocess.run(
+    [sys.executable, HOOK],
+    input=json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                      "session_id": "t-long", "cwd": WORKDIR,
+                      "tool_input": {"command": "echo " + "a" * 100000 + "; sudo id"}}),
+    capture_output=True, text=True, env=env, timeout=30)
+out = json.loads(proc.stdout) if proc.stdout.strip() else {}
+check("слово 100 КБ + sudo: решение есть и не «пропуск» (T1)",
+      decision(out) in ("deny", "ask"), str(decision(out)))
 
 shutil.rmtree(TMP, ignore_errors=True)
 print("\nSUMMARY:", "ALL PASSED" if not FAILS else "FAILED({}) {}".format(

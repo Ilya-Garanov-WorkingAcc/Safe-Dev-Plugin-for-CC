@@ -25,6 +25,9 @@ _REQUIRED = ("id", "class", "severity", "match", "message", "remediation", "refe
 
 _CACHE = {}
 _GLOB_CACHE = {}
+# Ссылка на переменную, оставшуюся в тексте операнда после подстановки
+# известных значений: цель вычисляется на лету.
+_VAR_RE = re.compile(r"\$(?:[A-Za-z_@*#?!0-9-]|\{)")
 
 
 # --- Загрузка --------------------------------------------------------------
@@ -284,8 +287,14 @@ def match_command(cmd, rule, ctx=None):
         if not ctx.get("has_root_target"):
             return False
     if m.get("target_dynamic"):
-        if not any("$()" in t for t in cmd.operands):
+        # `$()` — маркер подстановки (см. cmdparse._render); `$X` — переменная,
+        # значение которой в строке не задано: `rm -rf "$X/"` при пустом X —
+        # это `rm -rf /`, ровно класс инцидента 18.09.2026.
+        if not (ctx.get("operand_dynamic")
+                or any("$()" in t or _VAR_RE.search(t) for t in cmd.operands)):
             return False
+    if m.get("cwd_unsafe") and not ctx.get("cwd_unsafe"):
+        return False
     if m.get("require_operands") and not cmd.operands:
         return False
 
@@ -315,25 +324,40 @@ def match_regex(text, rule):
     return list(m["_rx"].finditer(text))
 
 
-def match_path(path, tool, rule):
-    """kind: "path" — чувствительный путь для данного инструмента."""
+def match_path(path, tool, rule, mode="read"):
+    """kind: "path" — чувствительный путь для данного инструмента.
+
+    `mode` выбирает список инструментов: чтение сверяется с `tools`, запись —
+    с `write_tools`. Так одно правило закрывает и чтение ключа, и запись в
+    него разными наборами инструментов.
+    """
     m = rule["match"]
     if m["kind"] != "path":
         return False
-    tools = m.get("tools")
-    if tools and tool not in tools:
+    tools = m.get("write_tools" if mode == "write" else "tools")
+    if not tools or tool not in tools:
         return False
     if any_glob(m.get("path_glob_not"), path):
         # `.env.example` — часть репозитория, а не секрет; без исключения
         # правило по `.env*` ловило бы каждый шаблон конфигурации.
         return False
-    return any_glob(m.get("path_glob"), path)
+    # Каталог без завершающего слэша (`~/.ssh`, цель Grep/Glob) должен
+    # совпадать с `**/.ssh/**`: без этого чтение всего каталога проходило мимо.
+    variants = [path]
+    if not path.endswith("/"):
+        variants.append(path.rstrip("/") + "/")
+    return any(any_glob(m.get("path_glob"), v) for v in variants)
 
 
 def bash_readers(rule):
     """argv0, для которых путь из rules/paths.json считается прочитанным
     через Bash (TS.md §12.1): `cat ~/.ssh/id_rsa` — то же чтение, что Read."""
     return set(rule["match"].get("bash_readers") or [])
+
+
+def bash_writers(rule):
+    """argv0, для которых операнд-путь считается записью: `tee`, `cp`, `ln`…"""
+    return set(rule["match"].get("bash_writers") or [])
 
 
 def match_config_key(present_keys, rule):

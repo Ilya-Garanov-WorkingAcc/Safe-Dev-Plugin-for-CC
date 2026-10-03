@@ -84,6 +84,9 @@ BLOCKED_BASH = [
     "cat .env",
     "grep TOKEN .env.production",
     "tail -5 ../other/.env",
+    "bash <<'EOF'\ncat ~/.ssh/id_rsa\nEOF",
+    "cat > leak.sh <<'EOF'\ncat ~/.ssh/id_rsa\nEOF",
+    "cat > leak <<'EOF'\ncat ~/.ssh/id_rsa\nEOF\nbash leak",
 ]
 
 ALLOWED_BASH = [
@@ -99,6 +102,7 @@ ALLOWED_BASH = [
     "git config user.email",
     "grep -rn TODO src/",
     "docker ps",
+    "cat > notes.md <<'EOF'\nКлюч читается так:\ncat ~/.ssh/id_rsa\nEOF",
 ]
 
 print("=== A: чтение секретов через Bash ({} шт.) ===".format(len(BLOCKED_BASH)))

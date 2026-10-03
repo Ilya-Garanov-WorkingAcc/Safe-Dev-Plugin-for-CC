@@ -31,7 +31,13 @@ CORE_EXTRA = {"cmdparse": "tests/test_cmdparse.py",
 def batteries():
     found = sorted(glob.glob(os.path.join(ROOT, "hooks", "*.tests.py")))
     found += [os.path.join(ROOT, "tests", "test_core.py"),
-              os.path.join(ROOT, "tests", "test_cmdparse.py")]
+              os.path.join(ROOT, "tests", "test_cmdparse.py"),
+              os.path.join(ROOT, "tests", "test_regex_budget.py"),
+              os.path.join(ROOT, "tests", "test_constructs.py"),
+              os.path.join(ROOT, "tests", "test_rules_p2.py"),
+              os.path.join(ROOT, "tests", "test_secrets_p3.py"),
+              os.path.join(ROOT, "tests", "test_trust_inj_p4.py"),
+              os.path.join(ROOT, "tests", "test_integrity_p5.py")]
     return found
 
 
@@ -73,10 +79,10 @@ def main(argv=None):
     results = []
     for battery in batteries():
         name = os.path.relpath(battery, ROOT)
-        started = time.time()
+        started = time.monotonic()
         proc = subprocess.run([sys.executable, battery], capture_output=True,
                               encoding="utf-8", errors="replace")
-        elapsed = time.time() - started
+        elapsed = time.monotonic() - started
         ok = proc.returncode == 0
         results.append((name, ok, elapsed))
 

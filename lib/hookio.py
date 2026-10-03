@@ -17,7 +17,11 @@
 
 import json
 import os
+import select
+import signal
+import stat
 import sys
+import tempfile
 import time
 
 # На консолях с не-UTF8 локалью stdout кодирует строго и падает с
@@ -36,6 +40,13 @@ FAIL_CLOSED = "closed"
 _T0 = time.time()
 _LAST_EVENT = ""
 _LAST_INPUT = {}
+_PRELOADED = None          # stdin, уже прочитанный сторожем (см. guard)
+
+# Бюджет хука по событию, секунды. Он заведомо меньше `timeout` в hooks.json:
+# хук, убитый Claude Code по таймауту, действие НЕ блокирует, поэтому отвечать
+# надо самому и раньше — «не успел проверить» вместо молчаливого пропуска.
+BUDGETS = {"PreToolUse": 3.5, "ConfigChange": 3.5, "PostToolUse": 7.0,
+           "SessionStart": 7.0, "SubagentStart": 3.5}
 
 
 # --- Пути ------------------------------------------------------------------
@@ -81,12 +92,11 @@ def _remember_data_dir(real_dir, fallback):
     if os.path.abspath(real_dir) == os.path.abspath(fallback):
         return
     try:
-        os.makedirs(fallback, exist_ok=True)
-        pointer = os.path.join(fallback, _POINTER_NAME)
-        tmp = pointer + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            fh.write(os.path.abspath(real_dir))
-        os.replace(tmp, pointer)
+        target = os.path.abspath(real_dir)
+        if _recall_data_dir(fallback) == target:
+            return                      # указатель актуален — лишней записи нет
+        ensure_dir(fallback)
+        atomic_write(os.path.join(fallback, _POINTER_NAME), target)
     except OSError:
         pass
 
@@ -108,6 +118,52 @@ def ensure_dir(path, mode=0o700):
     return path
 
 
+# --- Запись файлов плагина -------------------------------------------------
+#
+# Каталог данных доступен на запись агенту. Предсказуемое имя временного
+# файла и открытие по пути превращали сам хук в инструмент: симлинк на месте
+# `<файл>.tmp` или дневного журнала заставлял плагин перезаписать `~/.bashrc`
+# или `authorized_keys` своими руками, в обход собственных правил.
+
+def atomic_write(path, text, mode=0o600):
+    """Запись через mkstemp (O_EXCL, случайное имя) и rename.
+
+    rename заменяет сам симлинк, а не его цель, поэтому подложенная ссылка на
+    месте `path` не уводит запись в чужой файл.
+    """
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", prefix=".sd-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fchmod(fh.fileno(), mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def append_line(path, line, mode=0o600):
+    """Дописать строку, не следуя симлинку и только в свой обычный файл."""
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, mode)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or (
+                hasattr(os, "getuid") and info.st_uid != os.getuid()):
+            raise OSError("audit target is not a regular file owned by the user")
+        os.write(fd, line.encode("utf-8", errors="replace"))
+        try:
+            os.fchmod(fd, mode)
+        except OSError:
+            pass
+    finally:
+        os.close(fd)
+
+
 def elapsed_ms():
     """Латентность хука от импорта hookio до вызова. Пишется в каждую запись
     аудита; тесты падают при превышении p95 из TS.md §1.3."""
@@ -119,7 +175,7 @@ def elapsed_ms():
 def read():
     """Прочитать и разобрать stdin. Пустой ввод → exit 0 (штатный no-op)."""
     global _LAST_EVENT, _LAST_INPUT
-    raw = sys.stdin.read()
+    raw = _PRELOADED if _PRELOADED is not None else sys.stdin.read()
     if not raw.strip():
         sys.exit(0)
     data = json.loads(raw)
@@ -235,10 +291,25 @@ _FAIL_CLOSED_MESSAGE = (
     "secure-dev: не удалось проверить операцию. Подтвердите вручную, "
     "если она ожидаема."
 )
+_TIMEOUT_MESSAGE = (
+    "secure-dev: проверка не уложилась в отведённое время (слишком длинный "
+    "или сложный ввод). Подтвердите вручную, если операция ожидаема."
+)
 
 
-def guard(fail_mode, hook_name="unknown"):
+def guard(fail_mode, hook_name="unknown", on_timeout=None, default_event=""):
     """Декоратор main(). Ловит всё, что не SystemExit, и применяет режим отказа.
+
+    Плюс сторож по времени: логика хука выполняется в дочернем процессе, а
+    родитель ждёт её не дольше BUDGETS[событие]. Сигналом или потоком это не
+    сделать — регулярное выражение в катастрофическом бэктрекинге держит GIL
+    и не прерывается. По истечении бюджета ребёнок убивается, и срабатывает
+    `on_timeout(data)` либо режим отказа (FAIL_CLOSED на PreToolUse → ask).
+    Сторож включается только у настоящего хука (stdout не подменён): батареи
+    вызывают main() в процессе теста и перехватывают вывод через StringIO.
+
+    `default_event` — событие, на которое хук зарегистрирован: если вход не
+    разобрался как JSON, fail-closed-хуку всё равно нужно знать, чем отвечать.
 
     Механизм эскалации зависит от события — decision control не единообразен
     (ARCHITECTURE §4.1, §10.5-10.6):
@@ -251,30 +322,123 @@ def guard(fail_mode, hook_name="unknown"):
         заблокировать сессию даже штатным путём.
     """
     def deco(fn):
-        def wrapper(*a, **kw):
+        def guarded(*a, **kw):
             try:
                 return fn(*a, **kw)
             except SystemExit:
                 raise
             except BaseException as exc:            # noqa: BLE001 — это и есть точка
                 _audit_error(hook_name, exc)
-                if fail_mode == FAIL_CLOSED:
-                    if _LAST_EVENT == "PreToolUse":
-                        ask(_LAST_EVENT, _FAIL_CLOSED_MESSAGE)
-                    elif _LAST_EVENT == "ConfigChange":
-                        block_config(_FAIL_CLOSED_MESSAGE)
+                _fail(fail_mode, _LAST_EVENT or default_event, _FAIL_CLOSED_MESSAGE)
                 sys.exit(0)
+
+        def wrapper(*a, **kw):
+            if not _watchdog_available():
+                return guarded(*a, **kw)
+            return _run_with_deadline(guarded, a, kw, fail_mode, hook_name,
+                                      on_timeout, default_event)
         return wrapper
     return deco
 
 
-def _audit_error(hook_name, exc):
+def _fail(fail_mode, event, message):
+    if fail_mode != FAIL_CLOSED:
+        return
+    if event == "PreToolUse":
+        ask(event, message)
+    elif event == "ConfigChange":
+        block_config(message)
+
+
+def _watchdog_available():
+    return (hasattr(os, "fork") and sys.stdout is sys.__stdout__
+            and os.environ.get("SECURE_DEV_NO_WATCHDOG") != "1")
+
+
+def _run_with_deadline(fn, a, kw, fail_mode, hook_name, on_timeout, default_event):
+    """Выполнить хук в дочернем процессе с ограничением по времени."""
+    global _PRELOADED, _LAST_EVENT, _LAST_INPUT
+    _PRELOADED = sys.stdin.read()
+    data = {}
+    try:
+        parsed = json.loads(_PRELOADED) if _PRELOADED.strip() else {}
+        if isinstance(parsed, dict):
+            data = parsed
+    except (ValueError, RecursionError):
+        data = {}
+    event = data.get("hook_event_name") or default_event
+    budget = BUDGETS.get(event, 3.5) - (time.time() - _T0)
+
+    sys.stdout.flush()
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:                                    # ребёнок: собственно хук
+        code = 0
+        try:
+            os.close(read_fd)
+            os.dup2(write_fd, 1)
+            os.close(write_fd)
+            fn(*a, **kw)
+        except SystemExit as exc:
+            code = exc.code if isinstance(exc.code, int) else 0
+        except BaseException:                       # noqa: BLE001
+            code = 1
+        try:
+            sys.stdout.flush()
+        except Exception:
+            pass
+        os._exit(code)
+
+    os.close(write_fd)
+    chunks, deadline, timed_out = [], time.time() + max(budget, 0.2), False
+    while True:
+        left = deadline - time.time()
+        if left <= 0:
+            timed_out = True
+            break
+        ready, _, _ = select.select([read_fd], [], [], left)
+        if not ready:
+            timed_out = True
+            break
+        block = os.read(read_fd, 65536)
+        if not block:
+            break
+        chunks.append(block)
+    os.close(read_fd)
+
+    if timed_out:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+        os.waitpid(pid, 0)
+        _LAST_EVENT, _LAST_INPUT = event, data
+        _audit_error(hook_name, TimeoutError("hook budget exceeded"), rule="HOOK_TIMEOUT")
+        if on_timeout is not None:
+            try:
+                on_timeout(data)
+            except SystemExit:
+                raise
+            except BaseException:                   # noqa: BLE001
+                pass
+        _fail(fail_mode, event, _TIMEOUT_MESSAGE)
+        sys.exit(0)
+
+    _, status = os.waitpid(pid, 0)
+    out = b"".join(chunks)
+    if out:
+        sys.stdout.buffer.write(out)
+        sys.stdout.flush()
+    sys.exit(os.WEXITSTATUS(status) if os.WIFEXITED(status) else 0)
+
+
+def _audit_error(hook_name, exc, rule="PARSER_ERROR"):
     """Ошибка идёт в аудит, но её текст никогда — пользователю."""
     try:
         from lib import audit
         audit.write({
             "kind": "event", "hook": hook_name, "event": _LAST_EVENT or None,
-            "rule": "PARSER_ERROR", "class": "internal", "severity": "LOW",
+            "rule": rule, "class": "internal", "severity": "LOW",
             "action": "error", "evidence": repr(exc)[:512],
             "latency_ms": elapsed_ms(),
         }, _LAST_INPUT)

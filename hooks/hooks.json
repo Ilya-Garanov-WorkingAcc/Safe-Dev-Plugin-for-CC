@@ -58,7 +58,7 @@
         ]
       },
       {
-        "matcher": "Read|Glob|Grep|Bash",
+        "matcher": "Read|Glob|Grep|Bash|Write|Edit|MultiEdit|NotebookEdit|mcp__.*",
         "hooks": [
           {
             "type": "command",
@@ -93,7 +93,7 @@
         ]
       },
       {
-        "matcher": "Read|WebFetch|Bash|mcp__.*",
+        "matcher": "Read|WebFetch|WebSearch|Grep|Glob|Bash|NotebookRead|Task|Agent|mcp__.*",
         "hooks": [
           {
             "type": "command",
@@ -102,15 +102,17 @@
             "timeout": 10
           }
         ]
-      },
+      }
+    ],
+    "PostToolUseFailure": [
       {
-        "matcher": "Write|Edit|MultiEdit",
+        "matcher": ".*",
         "hooks": [
           {
             "type": "command",
             "command": "python3",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/hook_test_runner.py"],
-            "timeout": 60
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/injection_scanner.py"],
+            "timeout": 10
           }
         ]
       }

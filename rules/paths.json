@@ -3,19 +3,43 @@
   "description": "Чувствительные пути (TS.md §12.1). Тонкий слой поверх декларативных permissions.deny: те закрывают инструмент Read, но не закрывают `cat ~/.ssh/id_rsa` через Bash. Отличие от secret_redactor: тот читает и маскирует по содержимому, path_guard не даёт прочитать вовсе — regex может не распознать нестандартный формат ключа, а путь известен заранее.",
   "rules": [
     {
+      "id": "path-self-protection",
+      "class": "self-protection",
+      "severity": "CRITICAL",
+      "match": {
+        "kind": "path",
+        "path_glob": ["**/.claude/settings.json", "**/.claude/settings.local.json", "**/.claude/plugins/**", "**/secure-dev.local.json", "**/.claude/secure-dev/**", "**/secure-dev/audit/**", "**/secure-dev/trust/**", "**/secure-dev/state/**", "**/.claude/plugins/**/secure-dev/**"],
+        "tools": ["Bash"],
+        "write_tools": ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"],
+        "bash_writers": ["tee", "sed", "cp", "mv", "install", "truncate", "ln", "dd", "patch", "rm", "shred", "cat", "python", "python3", "perl", "node", "jq"]
+      },
+      "message": "Файлы и данные secure-dev и настройки Claude Code не изменяются агентом: это отключило бы сам контроль или подменило политику.",
+      "remediation": "Настройки и политику правит человек в собственном терминале. Если плагин мешает конкретной операции — обсудите исключение: /secure-dev:policy.",
+      "reference": "docs/RUNBOOK.md#self-protection"
+    },
+    {
+      "id": "path-persistence-write",
+      "class": "persistence",
+      "severity": "HIGH",
+      "match": {
+        "kind": "path",
+        "path_glob": ["**/.bashrc", "**/.bash_profile", "**/.bash_login", "**/.profile", "**/.zshrc", "**/.zprofile", "**/.zshenv", "**/.bash_aliases", "**/.bash_logout", "**/.envrc", "**/.config/fish/config.fish", "**/.ssh/authorized_keys", "**/.ssh/config", "**/.gitconfig", "**/.config/git/config", "**/.config/autostart/**", "**/.config/systemd/user/**", "**/.local/bin/**", "**/.git/hooks/**", "**/.git/config", "**/.npmrc", "**/.inputrc", "**/.pam_environment", "/etc/profile", "/etc/profile.d/**", "/etc/bash.bashrc", "/etc/environment", "/etc/cron*/**", "**/.config/environment.d/**"],
+        "write_tools": ["Write", "Edit", "MultiEdit", "NotebookEdit"]
+      },
+      "message": "Запись в файл автозагрузки shell, ключи доступа или git-хуки — классический способ закрепиться в системе.",
+      "remediation": "Постоянные настройки окружения добавляет человек осознанно. Для разовой переменной используйте её в самой команде: VAR=x your-cmd.",
+      "reference": "docs/RUNBOOK.md#persistence"
+    },
+    {
       "id": "path-ssh-key",
       "class": "path-sensitive",
       "severity": "HIGH",
       "match": {
         "kind": "path",
-        "path_glob": ["**/.ssh/**", "**/id_rsa*", "**/id_ed25519*",
-                      "**/id_ecdsa*", "**/id_dsa*", "**/authorized_keys"],
+        "path_glob": ["**/.ssh/**", "**/id_rsa*", "**/id_ed25519*", "**/id_ecdsa*", "**/id_dsa*", "**/authorized_keys"],
         "path_glob_not": ["**/*.pub"],
         "tools": ["Read", "Glob", "Grep", "Bash"],
-        "bash_readers": ["cat", "less", "more", "head", "tail", "strings", "xxd",
-                         "od", "hexdump", "base64", "cp", "scp", "rsync", "tar",
-                         "zip", "gzip", "curl", "nc", "vi", "vim", "nano", "awk",
-                         "sed", "grep"]
+        "bash_readers": [".", "ag", "awk", "base32", "base64", "bat", "batcat", "cat", "column", "cp", "curl", "cut", "dd", "egrep", "emacs", "fold", "gpg", "grep", "gunzip", "gzip", "head", "hexdump", "install", "jq", "less", "ln", "more", "mv", "nano", "nc", "ncat", "nl", "node", "nvim", "od", "openssl", "paste", "perl", "php", "python", "python2", "python3", "rg", "rsync", "ruby", "scp", "sed", "shred", "sort", "source", "strings", "tac", "tail", "tar", "truncate", "uniq", "vi", "vim", "wget", "xxd", "yq", "zip"]
       },
       "message": "Приватные ключи SSH не читаются агентом.",
       "remediation": "Для работы с удалёнными хостами используйте ssh-agent: ключ остаётся в агенте, а команде достаточно `ssh host`. Публичный ключ (*.pub) читать можно.",
@@ -27,12 +51,9 @@
       "severity": "HIGH",
       "match": {
         "kind": "path",
-        "path_glob": ["**/.aws/credentials", "**/.aws/config", "**/.kube/config",
-                      "**/.docker/config.json", "**/.config/gcloud/**",
-                      "**/.azure/**", "**/.terraformrc", "**/terraform.tfstate"],
+        "path_glob": ["**/.aws/credentials", "**/.aws/config", "**/.aws/credentials.*", "**/.kube/config", "**/.kube/*.kubeconfig", "**/kubeconfig", "**/.docker/config.json", "**/.config/gcloud/**", "**/.azure/**", "**/.terraformrc", "**/*.tfstate", "**/*.tfstate.*", "**/*.tfvars", "**/.terraform.d/credentials.tfrc.json", "**/.config/gh/hosts.yml", "**/.config/glab-cli/**", "**/.config/yandex-cloud/**", "**/.vault-token", "**/.cargo/credentials*", "**/.gem/credentials", "**/.oci/**", "**/.s3cfg", "**/.boto", "**/.config/rclone/rclone.conf", "**/.config/git/credentials"],
         "tools": ["Read", "Glob", "Grep", "Bash"],
-        "bash_readers": ["cat", "less", "more", "head", "tail", "strings", "base64",
-                         "cp", "scp", "rsync", "tar", "curl", "jq", "grep", "awk"]
+        "bash_readers": [".", "ag", "awk", "base32", "base64", "bat", "batcat", "cat", "column", "cp", "curl", "cut", "dd", "egrep", "emacs", "fold", "gpg", "grep", "gunzip", "gzip", "head", "hexdump", "install", "jq", "less", "ln", "more", "mv", "nano", "nc", "ncat", "nl", "node", "nvim", "od", "openssl", "paste", "perl", "php", "python", "python2", "python3", "rg", "rsync", "ruby", "scp", "sed", "shred", "sort", "source", "strings", "tac", "tail", "tar", "truncate", "uniq", "vi", "vim", "wget", "xxd", "yq", "zip"]
       },
       "message": "Учётные данные облачных провайдеров не читаются агентом.",
       "remediation": "Профиль подставляется окружением: AWS_PROFILE=dev aws s3 ls. Проверить активный контекст можно командой `aws sts get-caller-identity` или `kubectl config current-context`.",
@@ -44,11 +65,9 @@
       "severity": "HIGH",
       "match": {
         "kind": "path",
-        "path_glob": ["**/*.pem", "**/*.p12", "**/*.pfx", "**/*.jks",
-                      "**/*.keystore", "**/.gnupg/**"],
+        "path_glob": ["**/*.pem", "**/*.p12", "**/*.pfx", "**/*.jks", "**/*.keystore", "**/.gnupg/**"],
         "tools": ["Read", "Glob", "Grep", "Bash"],
-        "bash_readers": ["cat", "less", "more", "head", "tail", "strings", "base64",
-                         "openssl", "cp", "scp", "rsync", "tar", "curl"]
+        "bash_readers": [".", "ag", "awk", "base32", "base64", "bat", "batcat", "cat", "column", "cp", "curl", "cut", "dd", "egrep", "emacs", "fold", "gpg", "grep", "gunzip", "gzip", "head", "hexdump", "install", "jq", "less", "ln", "more", "mv", "nano", "nc", "ncat", "nl", "node", "nvim", "od", "openssl", "paste", "perl", "php", "python", "python2", "python3", "rg", "rsync", "ruby", "scp", "sed", "shred", "sort", "source", "strings", "tac", "tail", "tar", "truncate", "uniq", "vi", "vim", "wget", "xxd", "yq", "zip"]
       },
       "message": "Файл сертификата или приватного ключа не читается агентом.",
       "remediation": "Для проверки сертификата достаточно метаданных: openssl x509 -in <файл> -noout -subject -dates — эта команда не выводит закрытую часть.",
@@ -60,11 +79,9 @@
       "severity": "HIGH",
       "match": {
         "kind": "path",
-        "path_glob": ["**/.netrc", "**/_netrc", "**/.pgpass", "**/.my.cnf",
-                      "**/.pypirc", "**/.npmrc", "**/.git-credentials"],
+        "path_glob": ["**/.netrc", "**/_netrc", "**/.pgpass", "**/.my.cnf", "**/.pypirc", "**/.npmrc", "**/.git-credentials", "**/.password-store/**", "**/.local/share/keyrings/**", "/proc/*/environ", "/etc/shadow", "**/.bash_history", "**/.zsh_history", "**/.psql_history", "**/.mysql_history", "**/.python_history"],
         "tools": ["Read", "Glob", "Grep", "Bash"],
-        "bash_readers": ["cat", "less", "more", "head", "tail", "strings", "grep",
-                         "awk", "sed", "cp", "curl"]
+        "bash_readers": [".", "ag", "awk", "base32", "base64", "bat", "batcat", "cat", "column", "cp", "curl", "cut", "dd", "egrep", "emacs", "fold", "gpg", "grep", "gunzip", "gzip", "head", "hexdump", "install", "jq", "less", "ln", "more", "mv", "nano", "nc", "ncat", "nl", "node", "nvim", "od", "openssl", "paste", "perl", "php", "python", "python2", "python3", "rg", "rsync", "ruby", "scp", "sed", "shred", "sort", "source", "strings", "tac", "tail", "tar", "truncate", "uniq", "vi", "vim", "wget", "xxd", "yq", "zip"]
       },
       "message": "Файл с сохранёнными паролями к сервисам не читается агентом.",
       "remediation": "Строку подключения без пароля можно собрать вручную; сам пароль клиент подставит из этого файла самостоятельно.",
@@ -76,11 +93,9 @@
       "severity": "CRITICAL",
       "match": {
         "kind": "path",
-        "path_glob": ["**/.claude/.credentials.json", "**/.claude/statsig/**",
-                      "**/.config/claude/**"],
+        "path_glob": ["**/.claude/.credentials.json", "**/.claude/statsig/**", "**/.config/claude/**", "**/.claude.json", "**/.claude/history.jsonl", "**/.claude/projects/**", "**/.claude/shell-snapshots/**"],
         "tools": ["Read", "Glob", "Grep", "Bash"],
-        "bash_readers": ["cat", "less", "more", "head", "tail", "strings", "jq",
-                         "grep", "cp", "curl", "base64"]
+        "bash_readers": [".", "ag", "awk", "base32", "base64", "bat", "batcat", "cat", "column", "cp", "curl", "cut", "dd", "egrep", "emacs", "fold", "gpg", "grep", "gunzip", "gzip", "head", "hexdump", "install", "jq", "less", "ln", "more", "mv", "nano", "nc", "ncat", "nl", "node", "nvim", "od", "openssl", "paste", "perl", "php", "python", "python2", "python3", "rg", "rsync", "ruby", "scp", "sed", "shred", "sort", "source", "strings", "tac", "tail", "tar", "truncate", "uniq", "vi", "vim", "wget", "xxd", "yq", "zip"]
       },
       "message": "Учётные данные самого Claude Code. Их чтение агентом означает возможность действовать от вашего имени вне этой сессии.",
       "remediation": "Проверить состояние авторизации можно командой /status в интерфейсе Claude Code.",
@@ -92,12 +107,11 @@
       "severity": "MEDIUM",
       "match": {
         "kind": "path",
-        "path_glob": ["**/.env", "**/.env.*", "**/secrets/**", "**/*.secrets.*"],
-        "path_glob_not": ["**/.env.example", "**/.env.sample", "**/.env.template",
-                          "**/.env.dist"],
-        "tools": ["Bash"],
-        "bash_readers": ["cat", "less", "more", "head", "tail", "strings", "grep",
-                         "awk", "sed", "base64", "cp", "scp", "curl", "source"]
+        "path_glob": ["**/.env", "**/.env.*", "**/*.env", "**/.flaskenv", "**/.dev.vars", "**/secrets/**", "**/*.secrets.*"],
+        "path_glob_not": ["**/.env.example", "**/.env.sample", "**/.env.template", "**/.env.dist"],
+        "tools": ["Read", "Glob", "Grep", "Bash"],
+        "bash_readers": [".", "ag", "awk", "base32", "base64", "bat", "batcat", "cat", "column", "cp", "curl", "cut", "dd", "egrep", "emacs", "fold", "gpg", "grep", "gunzip", "gzip", "head", "hexdump", "install", "jq", "less", "ln", "more", "mv", "nano", "nc", "ncat", "nl", "node", "nvim", "od", "openssl", "paste", "perl", "php", "python", "python2", "python3", "rg", "rsync", "ruby", "scp", "sed", "shred", "sort", "source", "strings", "tac", "tail", "tar", "truncate", "uniq", "vi", "vim", "wget", "xxd", "yq", "zip"],
+        "write_tools": ["Bash"]
       },
       "message": "Чтение .env через Bash обходит декларативный запрет Read(**/.env) из рекомендуемых настроек.",
       "remediation": "Имена переменных без значений: grep -o '^[A-Z_]*' .env. Значение конкретной переменной проверяйте через приложение, а не через вывод файла.",

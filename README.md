@@ -41,15 +41,38 @@ heartbeat. Хуки продолжают работать даже при `--dan
 | **RCE из клонированного репозитория** (CVE-2025-59536, CVE-2025-59356, CVE-2026-21852) | `config_trust` + `secure-dev scan` |
 | Разрушение рабочей машины: `rm -rf /`, `dd`, `mkfs`, форк-бомба | `command_guard` |
 | **Синхронизация с удалением в дом/корень**: `rsync --delete`, `find -delete`, `shred`, `wsl --unregister`, `chown -R /` — по назначению, а не по любому операнду; команды внутри запускаемых скриптов (`bash x.sh`, `./x.sh`) разбираются так же | `command_guard`, RUNBOOK `sync-destructive` |
-| Потеря работы в git: `checkout --`, `reset --hard`, `clean -f`, force-push | `command_guard` |
-| Эскалация до root (в WSL sudo обычно без пароля) | `command_guard`, класс `privilege` |
-| Персистентность через `.bashrc`, cron, systemd, `/etc/wsl.conf` | `command_guard`, класс `persistence` |
-| Косвенные prompt injection в README, вебе и ответах MCP | `injection_scanner` |
-| Чтение ключей и учётных данных, в том числе через Bash | `path_guard` |
+| Код в теле heredoc: `bash <<EOF`, `cat <<EOF \| sh`, запись и запуск скрипта одной командой. Запись текста в файл (`cat > spec.md <<'EOF'`) при этом проходит без вопросов — тело считается данными | `command_guard`, RUNBOOK `command-destructive` |
+| Потеря работы в git: `checkout .`/`-f`, `restore -s`, `reset --hard`, `clean -f`, force-push и refspec-формы, стирание истории (`reflog expire`, `gc --prune`, `stash drop`), исполняемые ключи (`-c core.fsmonitor`, `ext::`) | `command_guard` |
+| Эскалация до root (в WSL sudo обычно без пароля), `su`, setuid, монтирование корня в контейнер | `command_guard`, класс `privilege` |
+| Персистентность через `.bashrc`, `authorized_keys`, `.git/hooks`, cron, systemd, автозапуск, `LD_PRELOAD`/`BASH_ENV` — и через Bash, и через Write/Edit | `command_guard`, `path_guard`, класс `persistence` |
+| **Отключение или подмена самого плагина**: правка `~/.claude/settings.json`, файлов и данных плагина, `claude plugin disable` — через Bash и инструменты записи | `command_guard`, `path_guard`, класс `self-protection` |
+| Windows-интероп из WSL: `wsl --unregister/--shutdown`, `cmd.exe`/`powershell.exe` с кодом, защита `/mnt/c/backup`, `/mnt/c/recovery` | `command_guard` |
+| Исполнение стороннего кода: `curl \| python`, «скачал и запустил», реверс-шеллы | `command_guard` |
+| Косвенные prompt injection в README, вебе и ответах MCP (другие языки, юникод-обфускация, поддельные теги, эксфильтрация по URL); при высокой уверенности сессия помечается и исходящие команды идут через `ask` | `injection_scanner` |
+| Чтение ключей и учётных данных, в том числе через Bash (`cat < ключ`, `curl --data @файл`, глоб, `python -c open()`) | `path_guard` |
 | Обход через субагента | все хуки, политика идентична |
+| Отказ по таймауту: длинная команда или зависшее регулярное выражение не «проскакивают» — хук отвечает `ask` раньше таймаута | ядро `hookio` |
+| Подмена политики или кода плагина: печать всех файлов, строгий режим при нечитаемой политике, хеш-цепочка журнала | `config`, `audit` |
 
 Чего плагин **не** делает: не ищет уязвимости в коде (ADR-004), не проверяет
 качество кода, не изолирует процесс, не заменяет secret scanning в CI.
+
+### Защита от отключения
+
+Плагин на пилоте ставится вручную, без managed settings, поэтому технически
+запретить его отключение нельзя — правила класса `self-protection` поднимают
+стоимость и делают попытку видимой (журнал, heartbeat), но не являются
+границей. Жёсткий запрет даёт только корпоративная конфигурация в
+`/etc/claude-code/managed-settings.json` (Linux/WSL):
+
+- `allowManagedHooksOnly: true` — работают только managed-хуки;
+- `permissions.disableBypassPermissionsMode: true` — запрет `--dangerously-skip-permissions`;
+- `strictKnownMarketplaces`, принудительный `enabledPlugins` — фиксируют состав плагинов;
+- неизменяемые `permissions.deny` — закрывают чтение секретов и правку конфигурации на уровне хоста.
+
+Файл managed-settings доступен только администратору; пользователь и агент его
+переопределить не могут. Это рекомендуемый способ развёртывания за пределами
+пилота.
 
 ---
 

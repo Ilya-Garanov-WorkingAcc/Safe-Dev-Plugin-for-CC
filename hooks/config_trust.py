@@ -188,7 +188,18 @@ def handle_config_change(data):
     hookio.passthrough()
 
 
-@hookio.guard(hookio.FAIL_CLOSED, HOOK)
+def on_timeout(data):
+    """SessionStart заблокировать нечем, но промолчать нельзя: конфигурация,
+    на которой проверка зависает, — сама по себе повод не доверять."""
+    if data.get("hook_event_name") == "SessionStart":
+        message = ("[secure-dev] Проверка конфигурации репозитория не завершилась "
+                   "за отведённое время. Репозиторий считается неподтверждённым; "
+                   "проверьте его вручную: secure-dev scan")
+        hookio.emit({"systemMessage": message, "hookSpecificOutput": {
+            "hookEventName": "SessionStart", "additionalContext": message}})
+
+
+@hookio.guard(hookio.FAIL_CLOSED, HOOK, on_timeout=on_timeout)
 def main():
     data = hookio.read()
     event = data.get("hook_event_name")

@@ -15,10 +15,17 @@ hooks/*.py — тонкие обвязки конкретного события
 import base64
 import binascii
 import re
+import unicodedata
 
 from lib import ruleset
 
 MAX_SCAN_BYTES = 200000
+# Крупный вывод сканируется началом и концом: инъекцию прячут и в хвосте за
+# балластом (аудит 03.10.2026, I1). Середина пропускается — туда её не
+# адресуешь, не зная, где обрежется вывод.
+HEAD_BYTES = 120000
+TAIL_BYTES = 60000
+MAX_MATCHES_PER_RULE = 50
 EVIDENCE_LIMIT = 160
 
 ZERO_WIDTH = "​‌‍⁠﻿᠎"
@@ -42,6 +49,22 @@ def strip_zero_width(text):
     return "".join(ch for ch in text if ch not in ZERO_WIDTH)
 
 
+def strip_invisible(text):
+    """Убрать форматирующие и комбинирующие символы, которыми прячут инъекцию:
+    zero-width, мягкий перенос, bidi-управление, variation selectors, теги
+    Unicode (U+E0000…). Категории Cf (format) и Mn (nonspacing mark)."""
+    out = []
+    for ch in text:
+        code = ord(ch)
+        if 0xE0000 <= code <= 0xE007F:              # Unicode tag characters
+            continue
+        cat = unicodedata.category(ch)
+        if cat in ("Cf", "Mn"):
+            continue
+        out.append(ch)
+    return "".join(out)
+
+
 def has_homoglyph_word(text):
     """Слово, в котором смешаны кириллица и латиница.
 
@@ -57,8 +80,14 @@ def has_homoglyph_word(text):
 
 
 def normalize(text):
-    """Текст без скрытых символов и с гомоглифами, приведёнными к латинице."""
-    text = strip_zero_width(text)
+    """Текст без скрытых символов, в форме NFKC и с гомоглифами на латинице.
+
+    NFKC складывает полноширинные и математические начертания к обычным
+    латинским: `ｉｇｎｏｒｅ` и `𝐢𝐠𝐧𝐨𝐫𝐞` после неё — просто `ignore`
+    (аудит 03.10.2026, I3).
+    """
+    text = strip_invisible(text)
+    text = unicodedata.normalize("NFKC", text)
     return "".join(HOMOGLYPHS.get(ch, ch) for ch in text)
 
 
@@ -90,12 +119,13 @@ def _is_quoted(text, start, end):
     line, offset = _line_of(text, start)
     rel_start, rel_end = start - offset, end - offset
     before, after = line[:rel_start], line[rel_end:]
+    # Цитатой считается только совпадение, ПОЛНОСТЬЮ заключённое в кавычки:
+    # открывающая кавычка слева и закрывающая справа в той же строке. Прежний
+    # счёт по чётности позволял спрятать инъекцию незакрытой кавычкой в начале
+    # строки (аудит 03.10.2026, I3).
     pairs = (("«", "»"), ("“", "”"), ('"', '"'), ("'", "'"), ("`", "`"))
     for left, right in pairs:
-        if left == right:
-            if before.count(left) % 2 == 1:
-                return True
-        elif before.count(left) > before.count(right) and right in after:
+        if left in before and right in after:
             return True
     return False
 
@@ -104,7 +134,7 @@ def line_number(text, position):
     return text.count("\n", 0, position) + 1
 
 
-PERMISSION_REF_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*\([\w*./~-]{1,80}\)")
+PERMISSION_REF_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}\([\w*./~-]{1,80}\)")
 
 
 def _is_permission_ref(haystack, start):
@@ -137,11 +167,13 @@ def scan(text):
             continue
         seen = set()
         for haystack in haystacks:
-            for match in ruleset.match_regex(haystack, rule):
+            for match in rule["match"]["_rx"].finditer(haystack):
                 start, end = match.span()
                 key = (rule["id"], match.group(0))
                 if key in seen:
                     continue
+                if len(seen) >= MAX_MATCHES_PER_RULE:
+                    break       # дальше картина не меняется, а время растёт
                 seen.add(key)
                 quoted = (_in_regions(start, regions)
                           or _is_quoted(haystack, start, end)
@@ -227,7 +259,10 @@ def extract_text(response):
                 walk(value, depth + 1)
 
     walk(response)
-    return "\n".join(chunks)[:MAX_SCAN_BYTES]
+    joined = "\n".join(chunks)
+    if len(joined) <= MAX_SCAN_BYTES:
+        return joined
+    return joined[:HEAD_BYTES] + "\n…\n" + joined[-TAIL_BYTES:]
 
 
 def format_context(tool, target, findings, confidence):

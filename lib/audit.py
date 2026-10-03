@@ -235,8 +235,8 @@ def base_record(hook_input):
 def sanitize_evidence(value):
     """Усечение до 512 символов и обязательный прогон через redact().
 
-    Порядок именно такой: усекаем сначала, чтобы длинный вывод не стоил лишнего
-    прохода регулярками, но редактируем всегда — усечение защитой не является.
+    Порядок именно такой: маскируем в щедром окне, ПОТОМ обрезаем. Обрезка до
+    маскирования оставляла бы префикс секрета на границе (аудит 03.10.2026, S6).
     """
     if value is None:
         return None
@@ -245,11 +245,11 @@ def sanitize_evidence(value):
             value = json.dumps(value, ensure_ascii=False)[:EVIDENCE_LIMIT * 2]
         except Exception:
             value = str(value)
-    value = value[:EVIDENCE_LIMIT]
+    value = value[:EVIDENCE_LIMIT * 16]
     try:
         from lib import redact as _redact
         cleaned, _ = _redact.redact(value)
-        return cleaned
+        return cleaned[:EVIDENCE_LIMIT]
     except Exception:
         return "[unredactable]"
 
@@ -260,6 +260,8 @@ def write(record, hook_input=None):
         full = base_record(hook_input)
         full.update({k: v for k, v in (record or {}).items()})
         full["evidence"] = sanitize_evidence(full.get("evidence"))
+        if isinstance(full.get("target"), str):
+            full["target"] = sanitize_evidence(full["target"])
         _append(day_file(), full)
     except Exception:
         pass
@@ -287,28 +289,46 @@ def heartbeat(fields, hook_input=None):
         pass
 
 
-def _append(path, record):
-    line = json.dumps(record, ensure_ascii=False) + "\n"
-    with open(path, "a", encoding="utf-8") as fh:
-        fh.write(line)
+def _chain_path():
+    return os.path.join(state_dir(), "audit-chain.json")
+
+
+def _chain_next(record):
+    """Присвоить записи порядковый номер и хеш предыдущей записи.
+
+    Цепочка `seq` + `prev` делает стирание и усечение журнала заметными:
+    пропуск в нумерации или обрыв хеш-цепи виден при разборе, даже если файл
+    переписан (аудит 03.10.2026, S3). Последнее состояние — в state/, оно тоже
+    может быть стёрто агентом, но рассинхрон номеров с журналом это обнажит.
+    """
     try:
-        os.chmod(path, 0o600)
-    except OSError:
+        state = read_json(_chain_path(), None) or {}
+        seq = int(state.get("seq", 0)) + 1
+        prev = state.get("last_hash", "")
+    except Exception:
+        seq, prev = 1, ""
+    record["seq"] = seq
+    record["prev"] = prev
+    line = json.dumps(record, ensure_ascii=False)
+    digest = hashlib.sha256((prev + line).encode("utf-8")).hexdigest()
+    record["h"] = digest
+    try:
+        write_json(_chain_path(), {"seq": seq, "last_hash": digest,
+                                   "ts": now_iso()})
+    except Exception:
         pass
+    return json.dumps(record, ensure_ascii=False)
+
+
+def _append(path, record):
+    hookio.append_line(path, _chain_next(record) + "\n")
 
 
 def write_json(path, obj, mode=0o600):
     """Атомарная запись: .tmp + rename. Оборванная запись состояния хуже, чем
     её отсутствие — при следующем старте битый JSON выглядел бы как сброс
     доверия к репозиторию."""
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(obj, fh, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
-    try:
-        os.chmod(path, mode)
-    except OSError:
-        pass
+    hookio.atomic_write(path, json.dumps(obj, ensure_ascii=False, indent=2), mode)
 
 
 def read_json(path, default=None):

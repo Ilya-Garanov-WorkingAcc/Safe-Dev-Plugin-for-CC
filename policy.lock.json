@@ -1,5 +1,6 @@
 {
-  "policy_sha256": "0adcdb8a9d8cbb559e38e56deb9653182b19a2af5bce3ae1d69d6371526331cf",
+  "policy_sha256": "3f38090baec886bfeab54fa9215be2e304106042366b101a0f974cf92a207afe",
+  "code_sha256": "2edcd29f623698a0dfd9e764cf9b756d2df268b8d8d7f6f93e79a2bf608bc603",
   "policy_version": "2026.08-p0-fix",
-  "plugin_version": "2.1.1"
+  "plugin_version": "3.0.0"
 }

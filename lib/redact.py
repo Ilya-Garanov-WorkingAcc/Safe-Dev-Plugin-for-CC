@@ -9,9 +9,22 @@
 коде без правок — это и есть доказательство отсутствия регрессии (PLAN.md 0.10).
 """
 
+import re
+
 from lib import ruleset
 
 PLACEHOLDER = "[REDACTED:{}]"
+
+# Значения, которые не являются секретом, даже если ключ назван «...secret»:
+# типы, литералы, шаблоны-плейсхолдеры, схемы авторизации. Иначе `token:
+# string`, `Authorization: Bearer <token>`, `password = None` давали ложное
+# срабатывание и портили код, который читает модель (аудит 03.10.2026, C8).
+_KEYWORD_VALUE_RE = re.compile(
+    r"^(?:string|str|int|integer|bool|boolean|true|false|null|none|nil|required|"
+    r"optional|number|object|array|any|void|undefined|empty|bearer|basic|digest|"
+    r"token|secret|password|changeme|placeholder|example|redacted|x{3,}|"
+    r"os\.environ[\w.()\[\]\"']*|process\.env[\w.()\[\]\"']*|"
+    r"<[^>]*>|\$\{?[\w.]+\}?|env\.[\w.]+|\[redacted:[^\]]*\])$", re.I)
 
 
 def rules():
@@ -46,6 +59,8 @@ def redact(text):
                 return m.group(0)
             if "REDACTED" in val:        # значение уже вычищено ранее — пропускаем
                 return m.group(0)
+            if _name == "ENV_SECRET" and _KEYWORD_VALUE_RE.match(val.strip()):
+                return m.group(0)            # тип/литерал/плейсхолдер, не секрет
             findings.append((_name, mask(val)))
             ph = PLACEHOLDER.format(_name)
             if _grp == 0:

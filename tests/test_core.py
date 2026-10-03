@@ -14,6 +14,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -154,6 +155,19 @@ check("класс действует при отсутствии id",
 check("иначе глобальный уровень",
       config.effective_level("новое-правило", "новый-класс") == "audit")
 
+LOCAL_RULE = {"id": "local-x", "class": "command-destructive", "severity": "HIGH",
+              "message": "м", "remediation": "р", "reference": "с"}
+set_local({"extra_rules": [
+    dict(LOCAL_RULE, match={"kind": "command", "argv0": ["terraform"]}),
+    dict(LOCAL_RULE, id="local-re", match={"kind": "regex", "pattern": "(a+)+$"}),
+    dict(LOCAL_RULE, id="local-args-re",
+         match={"kind": "command", "argv0": ["x"], "args_regex_any": ["(a+)+$"]})]})
+check("локальное правило kind=command принято",
+      [r["id"] for r in config.extra_rules()] == ["local-x"],
+      str([r["id"] for r in config.extra_rules()]))
+check("локальные правила с регулярными выражениями отклонены (T5)",
+      ("LOCAL_OVERRIDE_UNKNOWN", "extra_rules") in config.problems())
+
 print("=== C: config — исключения и хеш политики ===")
 check("исключение из политики применяется",
       config.exemption_for("command-rm-recursive-outside-cwd",
@@ -162,7 +176,7 @@ check("исключение не применяется к чужой цели",
       config.exemption_for("command-rm-recursive-outside-cwd", "/x/src") is None)
 check("sha256 политики считается", len(config.policy_sha256() or "") == 64)
 check("состояние печати определено",
-      config.seal_status() in ("ok", "tampered", "unsealed"), config.seal_status())
+      config.seal_status() in ("ok", "tampered", "code_tampered", "unsealed"), config.seal_status())
 check("валидация политики без ошибок", config.validate() == [],
       str(config.validate()))
 check("исключение тестовых путей", config.is_excluded("src/tests/test_a.py"))
@@ -201,8 +215,15 @@ set_local({"level": "strict"})
 first = policy.resolve(rule, target="a.py", agent_id=None, session_id="s1")
 second = policy.resolve(rule, target="a.py", agent_id=None, session_id="s1")
 check("первый ask не подавлен", not first["suppressed"])
-check("повторный ask подавлен памятью", second["suppressed"])
-third = policy.resolve(rule, target="a.py", agent_id="agent-9", session_id="s1")
+check("повторный ask НЕ подавляется памятью",
+      second["decision"] == policy.ASK and not second["suppressed"])
+low = dict(rule, id="r-low", severity="LOW")
+first = policy.resolve(low, target="a.py", agent_id=None, session_id="s1")
+second = policy.resolve(low, target="a.py", agent_id=None, session_id="s1")
+check("первый warn не подавлен", first["decision"] == policy.WARN
+      and not first["suppressed"])
+check("повторный warn подавлен памятью", second["suppressed"])
+third = policy.resolve(low, target="a.py", agent_id="agent-9", session_id="s1")
 check("память субагента отдельная", not third["suppressed"])
 
 hard = dict(rule, id="r-critical", severity="CRITICAL")
@@ -304,6 +325,95 @@ try:
 except Exception:                                                # noqa: BLE001
     ok = False
 check("JSON корректно разбирается обратно", ok, proc.stdout[:60])
+
+print("=== J: сторож по времени (аудит 03.10.2026, T1–T5) ===")
+# Хук, убитый Claude Code по таймауту, действие не блокирует. Поэтому хук
+# обязан ответить сам и раньше — в том числе когда завис на регулярном
+# выражении, которое из Python не прерывается.
+WATCHDOG = os.path.join(TMP, "slow_hook.py")
+with open(WATCHDOG, "w", encoding="utf-8") as fh:
+    fh.write(
+        "import re, sys, time\n"
+        "sys.path.insert(0, %r)\n"
+        "from lib import hookio\n"
+        "hookio.BUDGETS.update({'PreToolUse': 0.6, 'PostToolUse': 0.6})\n"
+        "MODE = sys.argv[1]\n"
+        "def on_timeout(data):\n"
+        "    if data.get('hook_event_name') == 'PostToolUse':\n"
+        "        hookio.context('PostToolUse', 'не проверено')\n"
+        "@hookio.guard(hookio.FAIL_CLOSED if MODE != 'open' else hookio.FAIL_OPEN,\n"
+        "              'slow', on_timeout=on_timeout, default_event='PreToolUse')\n"
+        "def main():\n"
+        "    data = hookio.read()\n"
+        "    if MODE == 'fast':\n"
+        "        hookio.deny('PreToolUse', 'быстрый отказ')\n"
+        "    if MODE == 'regex':\n"
+        "        re.match(r'(a+)+$', 'a' * 40 + '!')\n"
+        "    time.sleep(30)\n"
+        "main()\n" % ROOT)
+
+
+def slow(mode, event="PreToolUse", raw=None):
+    payload = raw if raw is not None else json.dumps(
+        {"hook_event_name": event, "tool_name": "Bash", "session_id": "w",
+         "tool_input": {"command": "ls"}})
+    started = time.monotonic()
+    proc = subprocess.run([sys.executable, WATCHDOG, mode], input=payload,
+                          capture_output=True, text=True, timeout=20)
+    took = time.monotonic() - started
+    try:
+        out = json.loads(proc.stdout) if proc.stdout.strip() else {}
+    except ValueError:
+        out = {"__raw__": proc.stdout}
+    return proc.returncode, out, took
+
+
+rc, out, took = slow("sleep")
+check("зависший fail-closed хук → ask раньше таймаута",
+      rc == 0 and (out.get("hookSpecificOutput") or {}).get("permissionDecision") == "ask"
+      and took < 3.0, "rc={} {:.1f}с {}".format(rc, took, str(out)[:40]))
+rc, out, took = slow("regex")
+check("бэктрекинг в regex не мешает сторожу",
+      (out.get("hookSpecificOutput") or {}).get("permissionDecision") == "ask"
+      and took < 3.0, "{:.1f}с {}".format(took, str(out)[:40]))
+rc, out, took = slow("fast")
+check("быстрый хук: решение передано без изменений",
+      (out.get("hookSpecificOutput") or {}).get("permissionDecision") == "deny"
+      and took < 2.0, "{:.1f}с {}".format(took, str(out)[:40]))
+rc, out, took = slow("open", event="PostToolUse")
+check("fail-open хук по таймауту вызывает on_timeout",
+      (out.get("hookSpecificOutput") or {}).get("additionalContext") == "не проверено",
+      str(out)[:60])
+rc, out, took = slow("sleep", raw="{битый json")
+check("битый JSON у fail-closed хука → ask, а не молчание",
+      (out.get("hookSpecificOutput") or {}).get("permissionDecision") == "ask",
+      str(out)[:60])
+check("таймаут записан в аудит",
+      any(r.get("rule") == "HOOK_TIMEOUT" for r in audit.iter_records()))
+
+print("=== K: запись файлов плагина не следует симлинкам (S4) ===")
+victim = os.path.join(TMP, "victim.txt")
+with open(victim, "w", encoding="utf-8") as fh:
+    fh.write("важное\n")
+link = os.path.join(TMP, "day.jsonl")
+os.symlink(victim, link)
+try:
+    hookio.append_line(link, "запись\n")
+    appended = True
+except OSError:
+    appended = False
+check("append_line отказывается писать через симлинк", not appended)
+with open(victim, encoding="utf-8") as fh:
+    check("файл-жертва не изменён", fh.read() == "важное\n")
+target = os.path.join(TMP, "state.json")
+os.symlink(victim, target + ".tmp")           # старое предсказуемое имя
+os.symlink(victim, target)
+hookio.atomic_write(target, "{}")
+with open(victim, encoding="utf-8") as fh:
+    check("atomic_write не трогает цель симлинка", fh.read() == "важное\n")
+check("на месте симлинка — обычный файл с правами 600",
+      not os.path.islink(target)
+      and stat.S_IMODE(os.stat(target).st_mode) == 0o600)
 
 shutil.rmtree(TMP, ignore_errors=True)
 print("\nSUMMARY:", "ALL PASSED" if not FAILS else "FAILED({}) {}".format(

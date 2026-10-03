@@ -40,6 +40,8 @@ LOCAL_FORBIDDEN = ("audit", "exemptions", "exclusions", "protected_branches",
 
 _CACHE = None
 _PROBLEMS = []
+_POLICY_READ_FAILED = False
+_SEAL_CACHE = None
 
 DEFAULTS = {
     "schema_version": 1,
@@ -99,18 +101,25 @@ def load():
 
 def reset_cache():
     """Только для тестов и CLI: политика перечитывается между сценариями."""
-    global _CACHE
+    global _CACHE, _SEAL_CACHE, _POLICY_READ_FAILED
     _CACHE = None
+    _SEAL_CACHE = None
+    _POLICY_READ_FAILED = False
     del _PROBLEMS[:]
 
 
 def _read_policy():
+    global _POLICY_READ_FAILED
     merged = json.loads(json.dumps(DEFAULTS))       # глубокая копия дефолтов
     data = {}
     try:
         with open(policy_path(), "r", encoding="utf-8") as fh:
             data = json.load(fh)
     except Exception:
+        # policy.json нечитаем или испорчен. Молча падать на дефолтный audit
+        # нельзя: это обход через порчу политики (аудит 03.10.2026, L4).
+        # Помечаем отказ — level() поднимет пол до strict.
+        _POLICY_READ_FAILED = True
         data = {}
     if isinstance(data, dict):
         for key, value in data.items():
@@ -204,6 +213,16 @@ def _is_denying_rule(rule):
     required = ("id", "class", "severity", "match", "message", "remediation", "reference")
     if any(f not in rule for f in required):
         return False
+    # Только kind=command. Регулярное выражение из файла, который может
+    # записать агент, — это способ повесить хук на каждой Bash-команде
+    # (`(a+)+$`) и получить пропуск по таймауту. В `args_regex_any` и
+    # `dest_regex_any` та же опасность, поэтому в локальных правилах запрещены
+    # и они.
+    match = rule.get("match")
+    if not isinstance(match, dict) or match.get("kind") != "command":
+        return False
+    if any(key.endswith("regex_any") for key in match):
+        return False
     return rule["severity"] in ("LOW", "MEDIUM", "HIGH", "CRITICAL")
 
 
@@ -263,12 +282,24 @@ def effective_level(rule_id, rule_class=None):
     floor = cfg.get("_local_floor")
     if floor:
         resolved = harder(resolved, floor)
-    return resolved
+    return harder(resolved, integrity_floor())
+
+
+def integrity_floor():
+    """Пол строгости, навязанный целостностью: strict при нечитаемой политике,
+    подмене печати policy.json или кода плагина. Иначе «audit»."""
+    # policy.json нечитаем или его печать не совпала — политику определить
+    if _POLICY_READ_FAILED:
+        return "strict"
+    if seal_status() == "tampered":
+        return "strict"
+    return "audit"
 
 
 def level():
     cfg = load()
-    return harder(cfg.get("level", "audit"), cfg.get("_local_floor") or "audit")
+    return harder(harder(cfg.get("level", "audit"), cfg.get("_local_floor") or "audit"),
+                  integrity_floor())
 
 
 def ui():
@@ -335,19 +366,27 @@ def is_excluded(path, cwd=None):
     return ruleset.any_glob(load().get("exclusions") or [], rel)
 
 
-def exemption_for(rule_id, target):
+def exemption_for(rule_id, target, targets=None):
     """Действующее исключение для пары (правило, цель) либо None.
 
     Просроченное исключение не применяется и пишет EXEMPTION_EXPIRED — это не
     позволяет исключению «зависнуть» навсегда (TS.md §4.4).
+
+    `targets` — все цели команды в раскрытом виде: исключение с `target_glob`
+    действует, только если ему удовлетворяет каждая; пустой список — цели есть,
+    но исключению не подлежат. None — вызывающий цели не раскрывал и передаёт
+    одну `target` (прежнее поведение).
     """
     from lib import ruleset
     today = datetime.date.today()
+    checked = (list(targets) if targets is not None
+               else ([target] if target else []))
     for item in load().get("exemptions") or []:
         if item.get("rule") != rule_id:
             continue
         glob = item.get("target_glob")
-        if glob and (not target or not ruleset.glob_match(glob, target)):
+        if glob and (not checked or not all(
+                isinstance(t, str) and ruleset.glob_match(glob, t) for t in checked)):
             continue
         expires = item.get("expires")
         try:
@@ -372,25 +411,59 @@ def policy_sha256():
         return None
 
 
+def code_sha256():
+    """sha256 манифеста файлов плагина — тот же расчёт, что в seal_policy."""
+    import glob as _glob
+    entries = []
+    root = hookio.plugin_root()
+    for pat in ("lib/*.py", "hooks/*.py", "rules/*.json", "policy.json",
+                "policy.schema.json", "bin/secure-dev", "hooks/hooks.json"):
+        for path in sorted(_glob.glob(os.path.join(root, pat))):
+            if path.endswith(".tests.py"):
+                continue
+            try:
+                with open(path, "rb") as fh:
+                    entries.append("{}:{}".format(
+                        os.path.relpath(path, root),
+                        hashlib.sha256(fh.read()).hexdigest()))
+            except OSError:
+                continue
+    return hashlib.sha256("\n".join(sorted(entries)).encode("utf-8")).hexdigest()
+
+
 def seal_status():
-    """'ok' | 'tampered' | 'unsealed'.
+    """Кэшируется на процесс: хеш манифеста на каждый effective_level() выбил бы
+    бюджет PreToolUse."""
+    global _SEAL_CACHE
+    if _SEAL_CACHE is None:
+        _SEAL_CACHE = _seal_status()
+    return _SEAL_CACHE
+def _seal_status():
+    """'ok' | 'tampered' | 'code_tampered' | 'unsealed'.
 
     'unsealed' — рабочая копия из git без релизного лока; это не подмена, но и
-    не подтверждённая политика, поэтому состояние различимо в heartbeat.
+    не подтверждённая политика. 'code_tampered' — изменён любой файл плагина
+    (lib/hooks/rules), а не только policy.json (аудит 03.10.2026, L4).
     """
-    expected = None
+    expected = expected_code = None
     try:
         with open(lock_path(), "r", encoding="utf-8") as fh:
-            expected = json.load(fh).get("policy_sha256")
+            locked = json.load(fh)
+            expected = locked.get("policy_sha256")
+            expected_code = locked.get("code_sha256")
     except Exception:
         expected = None
     if not expected:
         return "unsealed"
-    return "ok" if expected == policy_sha256() else "tampered"
+    if expected != policy_sha256():
+        return "tampered"
+    if expected_code and expected_code != code_sha256():
+        return "code_tampered"
+    return "ok"
 
 
 def is_tampered():
-    return seal_status() == "tampered"
+    return seal_status() in ("tampered", "code_tampered")
 
 
 # --- Рекомендуемый шаблон настроек -----------------------------------------
@@ -467,6 +540,9 @@ def validate(policy=None):
         issues.append("audit.export.type=file требует audit.export.path")
     if export.get("type") == "http" and not export.get("url"):
         issues.append("audit.export.type=http требует audit.export.url")
+    if export.get("type") == "http" and export.get("url") \
+            and not str(export.get("url")).startswith("https://"):
+        issues.append("audit.export.url должен быть https://")
     for item in (cfg.get("exemptions") or []):
         for field in ("rule", "reason", "expires", "approved_by"):
             if not item.get(field):

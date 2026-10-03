@@ -67,6 +67,36 @@
       "reference": "docs/RUNBOOK.md#command-destructive"
     },
     {
+      "id": "command-rm-recursive-unsafe-cwd",
+      "class": "command-destructive",
+      "severity": "MEDIUM",
+      "match": {
+        "kind": "command",
+        "argv0": ["rm"],
+        "flags_all": ["--recursive"],
+        "require_operands": true,
+        "cwd_unsafe": true
+      },
+      "message": "Рекурсивное удаление при рабочем каталоге — домашнем или корневом: «внутри текущего каталога» здесь значит «где угодно в доме».",
+      "remediation": "Перейдите в каталог проекта и удаляйте относительным путём оттуда: cd ~/projects/app && rm -rf build.",
+      "reference": "docs/RUNBOOK.md#command-destructive"
+    },
+    {
+      "id": "command-sync-delete-unsafe-cwd",
+      "class": "command-destructive",
+      "severity": "MEDIUM",
+      "match": {
+        "kind": "command",
+        "argv0": ["rsync", "find", "chown", "chgrp", "chmod"],
+        "flags_any": ["--delete", "--delete-before", "--delete-during", "--delete-delay", "--delete-after", "--delete-excluded", "--remove-source-files", "--recursive"],
+        "flags_not_any": ["--dry-run", "-n"],
+        "cwd_unsafe": true
+      },
+      "message": "Удаление при синхронизации или рекурсивная смена владельца и прав при рабочем каталоге — домашнем или корневом.",
+      "remediation": "Запускайте из каталога проекта; для синхронизации сначала --dry-run.",
+      "reference": "docs/RUNBOOK.md#sync-destructive"
+    },
+    {
       "id": "command-dd-device",
       "class": "command-destructive",
       "severity": "CRITICAL",
@@ -85,8 +115,7 @@
       "severity": "CRITICAL",
       "match": {
         "kind": "command",
-        "argv0": ["mkfs", "mkfs.*", "mke2fs", "fdisk", "sfdisk", "cfdisk",
-                  "parted", "wipefs", "shred", "blkdiscard"]
+        "argv0": ["mkfs", "mkfs.*", "mke2fs", "fdisk", "sfdisk", "cfdisk", "parted", "wipefs", "shred", "blkdiscard", "mkswap", "sgdisk"]
       },
       "message": "Разметка или затирание диска.",
       "remediation": "Операции с разделами выполняются человеком вне агента.",
@@ -98,7 +127,7 @@
       "severity": "CRITICAL",
       "match": {
         "kind": "regex",
-        "pattern": "([A-Za-z_:][A-Za-z0-9_]*)\\s*\\(\\s*\\)\\s*\\{[^}]*\\|[^}]*&[^}]*\\}\\s*;\\s*\\1"
+        "pattern": "(?<![A-Za-z0-9_:])([A-Za-z_:][A-Za-z0-9_]{0,63})\\s*\\(\\s*\\)\\s*\\{[^}]{0,200}\\|[^}]{0,200}&[^}]{0,200}\\}\\s*;\\s*\\1"
       },
       "message": "Рекурсивная функция, порождающая процессы без ограничения, — форк-бомба.",
       "remediation": "У такой конструкции нет легитимного применения. Для нагрузочных тестов используйте stress-ng с явными лимитами.",
@@ -224,7 +253,8 @@
       "severity": "MEDIUM",
       "match": {
         "kind": "regex",
-        "pattern": "(?:^|[;&|]\\s*)\\s*history\\s+-c\\b|\\bunset\\s+HISTFILE\\b|\\bHISTFILE\\s*=\\s*/dev/null\\b|\\brm\\b[^;&|]*\\.bash_history\\b|\\bhistory\\s+-w\\s*/dev/null\\b"
+        "pattern": "(?:^|[;&|{(])[ \\t]*history[ \\t]+-[a-z]*[cd]|\\bunset[ \\t]+HISTFILE\\b|\\bHISTFILE[ \\t]*=[ \\t]*/dev/null\\b|\\bHISTSIZE[ \\t]*=[ \\t]*0\\b|\\bset[ \\t]+\\+o[ \\t]+history\\b|\\b(?:rm|shred|truncate)\\b[^;&|\\n]{0,300}\\.(?:bash|zsh)_history\\b|\\bhistory[ \\t]+-w[ \\t]*/dev/null\\b",
+        "flags": "m"
       },
       "message": "Очистка истории шелла — действие, у которого нет задачи разработки, но есть задача сокрытия следов.",
       "remediation": "Если в историю попал секрет, сообщите об этом и отзовите его; чистка истории проблему не решает.",
@@ -540,6 +570,378 @@
       "reference": "docs/RUNBOOK.md#sync-destructive"
     },
     {
+      "id": "git-checkout-restore-worktree",
+      "class": "git-destructive",
+      "severity": "MEDIUM",
+      "match": {
+        "kind": "command",
+        "argv0": ["git"],
+        "args_regex_any": ["(?:^| )(?:checkout|switch|restore)\\b(?:(?! --dry-run| -n\\b).)*(?: -f\\b| --force\\b| --discard-changes\\b| --worktree\\b| -W\\b| -- | \\.(?: |$))"],
+        "args_not_contain_any": ["--dry-run"]
+      },
+      "message": "Откат файлов рабочего дерева к коммиту: незафиксированные изменения теряются без возможности восстановить.",
+      "remediation": "Сначала сохраните текущее состояние: git stash push -m before-discard; затем откат. Посмотреть, что потеряется: git diff.",
+      "reference": "docs/RUNBOOK.md#git-destructive"
+    },
+    {
+      "id": "git-push-destructive",
+      "class": "git-destructive",
+      "severity": "MEDIUM",
+      "match": {
+        "kind": "command",
+        "argv0": ["git"],
+        "args_contain_all": ["push"],
+        "args_regex_any": ["(?:^| )\\+\\S", "(?:^| )(?:--mirror|--prune)(?: |$)", "(?:^| ):\\S"],
+        "args_not_contain_any": ["--dry-run"]
+      },
+      "message": "Удаление или принудительная перезапись ветки на удалённом репозитории (refspec со знаком +, :ref, --delete, --mirror).",
+      "remediation": "Удаление и перезапись публичных веток согласуется с командой. Обычный push идёт без + и без --delete.",
+      "reference": "docs/RUNBOOK.md#git-destructive"
+    },
+    {
+      "id": "git-history-erase",
+      "class": "git-destructive",
+      "severity": "HIGH",
+      "match": {
+        "kind": "command",
+        "argv0": ["git"],
+        "args_regex_any": ["(?:^| )reflog\\b.*\\bexpire\\b", "(?:^| )gc\\b.*--prune", "(?:^| )update-ref\\b.*(?:^| )-d\\b", "(?:^| )stash\\b.*(?:^| )(?:drop|clear)\\b", "(?:^| )branch\\b.*(?:^| )(?:-f|--force)\\b", "(?:^| )tag\\b.*(?:^| )(?:-d|--delete)\\b", "(?:^| )(?:prune)\\b"]
+      },
+      "message": "Стирание истории или ссылок git: reflog expire, gc --prune, update-ref -d, stash drop/clear, перемещение ветки силой.",
+      "remediation": "Эти операции необратимо удаляют объекты. Если нужно освободить место или убрать ветку — согласуйте и выполните вне агента.",
+      "reference": "docs/RUNBOOK.md#git-destructive"
+    },
+    {
+      "id": "git-exec-config",
+      "class": "config-trust",
+      "severity": "HIGH",
+      "match": {
+        "kind": "command",
+        "argv0": ["git"],
+        "args_regex_any": ["(?:^| )-c\\s+\\S*(?:core\\.(?:fsmonitor|hookspath|sshcommand|pager|editor)|alias\\.\\S+=\\s*!|\\S+\\.\\S*textconv)", "(?:^| )(?:--upload-pack|--receive-pack|--exec)=", "ext::", "(?:^| )config\\b.*(?:core\\.(?:fsmonitor|hookspath|sshcommand)|alias\\.\\S+\\s+!)"]
+      },
+      "message": "Запуск git с ключами, исполняющими произвольную команду (core.fsmonitor, core.hooksPath, alias с !, --upload-pack, ext::).",
+      "remediation": "Эти настройки задают команды, которые git выполнит сам. Нужное поведение настраивается в репозитории человеком.",
+      "reference": "docs/RUNBOOK.md#git-destructive"
+    },
+    {
+      "id": "command-wsl-destructive",
+      "class": "command-destructive",
+      "severity": "CRITICAL",
+      "match": {
+        "kind": "command",
+        "argv0": ["wsl", "wsl.exe", "wslconfig", "wslconfig.exe"],
+        "args_regex_any": ["(?i)(?:^| )(?:--unregister|--uninstall|--shutdown|--terminate|-t|/u(?:nregister)?|/t)(?: |$)"]
+      },
+      "message": "Остановка, удаление или дерегистрация дистрибутива WSL. Дерегистрация уничтожает всю файловую систему дистрибутива — ровно инцидент 18.09.2026.",
+      "remediation": "Управление дистрибутивами WSL выполняется человеком осознанно вне агента.",
+      "reference": "docs/RUNBOOK.md#command-destructive"
+    },
+    {
+      "id": "command-windows-shell",
+      "class": "command-destructive",
+      "severity": "MEDIUM",
+      "match": {
+        "kind": "command",
+        "argv0": ["cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "pwsh.exe"],
+        "args_regex_any": ["(?i)(?:^| )(?:/c|/k|-c|-command|-enc|-encodedcommand|-e)\\b", "(?i)remove-item", "(?i)(?:^| )(?:rd|rmdir|del|erase)\\b", "(?i)(?:^| )(?:format|diskpart)\\b", "(?i)/MIR\\b", "(?i)(?:^| )(?:reg|sc|schtasks)(?:\\.exe)?\\b"]
+      },
+      "message": "Запуск cmd.exe/PowerShell с кодом или деструктивной операцией над дисками Windows из WSL (вне модели статического разбора).",
+      "remediation": "Операции в Windows из агента не проверяются построчно. Выполняйте их сами, если действительно нужны.",
+      "reference": "docs/RUNBOOK.md#command-destructive"
+    },
+    {
+      "id": "command-windows-recovery-path",
+      "class": "command-destructive",
+      "severity": "CRITICAL",
+      "match": {
+        "kind": "command",
+        "argv0": ["rm", "rmdir", "unlink", "mv", "shred", "truncate", "dd", "tee", "cp"],
+        "target_glob": ["/mnt/c/backup/**", "/mnt/c/recovery/**", "/mnt/c/backup/wsl/incident-*/**"]
+      },
+      "message": "Запись или удаление в каталогах восстановления и бэкапов Windows (/mnt/c/backup, /mnt/c/recovery) — уликах и копиях после инцидента.",
+      "remediation": "Эти каталоги трогает только человек (политика отдела после 18.09.2026).",
+      "reference": "docs/RUNBOOK.md#command-destructive"
+    },
+    {
+      "id": "command-curl-pipe-interpreter",
+      "class": "command-destructive",
+      "severity": "HIGH",
+      "match": {
+        "kind": "command",
+        "argv0": ["python", "python2", "python3", "perl", "ruby", "node", "nodejs", "php", "deno", "bun", "env"],
+        "piped_from_any": ["curl", "wget", "fetch", "http", "httpie"]
+      },
+      "message": "Исполнение скачанного кода интерпретатором напрямую из сети (curl … | python). Содержимое не проверяется и может быть любым.",
+      "remediation": "Скачайте в файл, прочитайте, затем запустите — тремя отдельными шагами.",
+      "reference": "docs/RUNBOOK.md#command-destructive"
+    },
+    {
+      "id": "command-decode-pipe-interpreter",
+      "class": "command-destructive",
+      "severity": "CRITICAL",
+      "match": {
+        "kind": "command",
+        "argv0": ["python", "python2", "python3", "perl", "ruby", "node", "nodejs", "php"],
+        "piped_from_any": ["base64", "xxd", "uudecode", "openssl", "gunzip", "zcat"]
+      },
+      "message": "Исполнение декодированного кода интерпретатором (base64 … | python).",
+      "remediation": "Раскодируйте отдельно и покажите результат, прежде чем запускать.",
+      "reference": "docs/RUNBOOK.md#command-destructive"
+    },
+    {
+      "id": "command-reverse-shell",
+      "class": "command-destructive",
+      "severity": "CRITICAL",
+      "match": {
+        "kind": "command",
+        "argv0": ["nc", "ncat", "netcat", "socat"],
+        "args_regex_any": ["(?:^| )-e\\b", "exec", "(?:^| )-c\\b"]
+      },
+      "message": "Запуск реверс-шелла (nc -e, socat exec): интерактивный доступ к машине извне.",
+      "remediation": "Для отладки сети достаточно nc без -e. Обратный шелл — не инструмент разработки.",
+      "reference": "docs/RUNBOOK.md#command-destructive"
+    },
+    {
+      "id": "command-delete-outside-cwd",
+      "class": "command-destructive",
+      "severity": "MEDIUM",
+      "match": {
+        "kind": "command",
+        "argv0": ["rm", "unlink", "rmdir", "shred", "truncate"],
+        "require_operands": true,
+        "target_outside_cwd": true,
+        "flags_not_any": ["--recursive"]
+      },
+      "message": "Удаление или обнуление файла вне рабочего каталога.",
+      "remediation": "Удаляйте относительным путём внутри проекта. Для файла вне проекта — проверьте путь и выполните сами, если он действительно лишний.",
+      "reference": "docs/RUNBOOK.md#command-destructive"
+    },
+    {
+      "id": "command-delete-root",
+      "class": "command-destructive",
+      "severity": "CRITICAL",
+      "match": {
+        "kind": "command",
+        "argv0": ["rm", "unlink", "rmdir", "shred", "truncate", "mv"],
+        "target_root": true,
+        "require_operands": true
+      },
+      "message": "Удаление или перемещение корня, домашнего каталога или каталога выше рабочего.",
+      "remediation": "Укажите конкретный подкаталог. Операции над домашним каталогом выполняет человек.",
+      "reference": "docs/RUNBOOK.md#command-destructive"
+    },
+    {
+      "id": "command-delete-git-internals",
+      "class": "command-destructive",
+      "severity": "HIGH",
+      "match": {
+        "kind": "command",
+        "argv0": ["rm", "unlink", "shred", "truncate"],
+        "target_glob": ["**/.git", "**/.git/**", ".git", ".git/**"]
+      },
+      "message": "Удаление служебных файлов git (.git, .git/refs, .git/HEAD) — потеря истории репозитория.",
+      "remediation": "Чтобы разорвать связь с git, достаточно переинициализации по отдельной процедуре; удалять .git вручную не нужно.",
+      "reference": "docs/RUNBOOK.md#command-destructive"
+    },
+    {
+      "id": "command-mv-outside-cwd",
+      "class": "command-destructive",
+      "severity": "MEDIUM",
+      "match": {
+        "kind": "command",
+        "argv0": ["mv"],
+        "dest_outside_cwd": true,
+        "require_operands": true
+      },
+      "message": "Перемещение в каталог вне рабочего: файл по назначению может быть перезаписан.",
+      "remediation": "Переносите внутри проекта; для переноса наружу проверьте, что по назначению ничего не затирается.",
+      "reference": "docs/RUNBOOK.md#command-destructive"
+    },
+    {
+      "id": "command-redirect-outside-cwd",
+      "class": "command-destructive",
+      "severity": "MEDIUM",
+      "match": {
+        "kind": "command",
+        "argv0": ["echo", "printf", "cat", "tee", "dd", "true", ":"],
+        "redirect_glob": ["/etc/**", "/boot/**", "/sys/**", "/dev/sd*", "/dev/nvme*", "/dev/vd*", "/dev/mmcblk*", "/dev/mem", "/dev/kmem", "/proc/sysrq-trigger", "**/.ssh/authorized_keys", "**/.ssh/id_*"]
+      },
+      "message": "Запись перенаправлением в системный путь, устройство или вне рабочего каталога — перезапись или порча файла.",
+      "remediation": "Пишите в файл внутри проекта. Запись в /dev/* и /etc/* выполняет человек.",
+      "reference": "docs/RUNBOOK.md#command-destructive"
+    },
+    {
+      "id": "command-disk-destructive",
+      "class": "command-destructive",
+      "severity": "CRITICAL",
+      "match": {
+        "kind": "command",
+        "argv0": ["mkswap", "swapoff", "sgdisk", "gdisk", "dmsetup", "cryptsetup", "hdparm", "nvme", "badblocks", "lvremove", "vgremove", "pvremove", "mdadm", "zpool", "zfs", "btrfs", "blkdiscard"],
+        "args_regex_any": ["(?:^| )(?:destroy|remove|erase|format|--zap-all|-w|--security-erase|remove_all|--stop|delete|subvolume delete)\\b"]
+      },
+      "message": "Деструктивная операция с диском, разделом или томом.",
+      "remediation": "Операции с дисками выполняет человек вне агента.",
+      "reference": "docs/RUNBOOK.md#command-destructive"
+    },
+    {
+      "id": "command-dev-write",
+      "class": "command-destructive",
+      "severity": "CRITICAL",
+      "match": {
+        "kind": "command",
+        "argv0": ["dd", "cp", "cat", "tee"],
+        "args_regex_any": ["of=/dev/(?:sd|nvme|vd|mmcblk|disk)"]
+      },
+      "message": "Запись напрямую на блочное устройство.",
+      "remediation": "Пишите в файл-образ: of=./image.img.",
+      "reference": "docs/RUNBOOK.md#command-destructive"
+    },
+    {
+      "id": "command-power",
+      "class": "command-destructive",
+      "severity": "HIGH",
+      "match": {
+        "kind": "command",
+        "argv0": ["shutdown", "reboot", "poweroff", "halt", "init", "telinit"]
+      },
+      "message": "Выключение или перезагрузка машины.",
+      "remediation": "Перезапуск выполняет человек.",
+      "reference": "docs/RUNBOOK.md#command-destructive"
+    },
+    {
+      "id": "command-privilege-escalate",
+      "class": "privilege",
+      "severity": "CRITICAL",
+      "match": {
+        "kind": "command",
+        "argv0": ["su", "sudoedit", "visudo", "usermod", "setcap", "chpasswd", "passwd", "newgrp", "sg", "runuser"]
+      },
+      "message": "Повышение привилегий или изменение учётных записей и возможностей.",
+      "remediation": "Эти операции выполняет человек в отдельном терминале.",
+      "reference": "docs/RUNBOOK.md#privilege"
+    },
+    {
+      "id": "command-setuid",
+      "class": "privilege",
+      "severity": "HIGH",
+      "match": {
+        "kind": "command",
+        "argv0": ["chmod"],
+        "args_regex_any": ["(?:^| )(?:[ugoa]*\\+s|[2467][0-7]{3})(?: |$)"]
+      },
+      "message": "Установка бита setuid/setgid — исполняемый файл получит права владельца при запуске.",
+      "remediation": "Для исполняемости достаточно +x без setuid.",
+      "reference": "docs/RUNBOOK.md#privilege"
+    },
+    {
+      "id": "command-chmod-recursive-unsafe",
+      "class": "command-destructive",
+      "severity": "HIGH",
+      "match": {
+        "kind": "command",
+        "argv0": ["chmod"],
+        "flags_all": ["--recursive"],
+        "args_regex_any": ["(?:^| )(?:000|0|a?[-+=][rwx]*w|go\\+w)(?: |$)"],
+        "target_root": true
+      },
+      "message": "Рекурсивная смена прав на весь домашний каталог или корень.",
+      "remediation": "Меняйте права точечно на нужных файлах.",
+      "reference": "docs/RUNBOOK.md#command-destructive"
+    },
+    {
+      "id": "command-docker-mount-host",
+      "class": "privilege",
+      "severity": "HIGH",
+      "match": {
+        "kind": "command",
+        "argv0": ["docker", "podman"],
+        "args_contain_any": ["run", "create"],
+        "args_regex_any": ["(?:^| )--privileged\\b", "(?:^| )(?:-v|--volume)\\s+/:", "docker\\.sock", "(?:^| )--pid=host\\b", "(?:^| )(?:-v|--volume)\\s+(?:~[:/]|\\$HOME|\\$\\{HOME\\})"]
+      },
+      "message": "Запуск контейнера с монтированием корня или сокета Docker либо в привилегированном режиме — выход на хост-систему.",
+      "remediation": "Монтируйте только нужный подкаталог проекта: -v $PWD:/app.",
+      "reference": "docs/RUNBOOK.md#privilege"
+    },
+    {
+      "id": "command-infra-destructive",
+      "class": "command-destructive",
+      "severity": "MEDIUM",
+      "match": {
+        "kind": "command",
+        "argv0": ["docker", "podman", "kubectl", "helm", "terraform", "aws", "gcloud", "az", "gsutil", "gh", "flyctl"],
+        "args_regex_any": ["(?:^| )(?:volume\\s+rm|volume\\s+prune|rmi\\s+-f|rm\\s+-f)\\b", "system\\s+prune\\b[^\\n]{0,80}?(?:--volumes|--all|(?:^| )-a)", "compose\\s+down\\s+[^\\n]{0,80}?-v", "(?:^| )delete\\b", "(?:^| )destroy\\b", "(?:^| )rb\\b", "(?:^| )rm\\b[^\\n]{0,80}?(?:--recursive|(?:^| )-[a-zA-Z]*r)", "(?:^| )terminate-instances\\b", "(?:^| )uninstall\\b", "(?:^| )apply\\s+-destroy\\b"]
+      },
+      "message": "Удаление инфраструктуры, томов, образов, баз или ресурсов в облаке.",
+      "remediation": "Удаление инфраструктуры согласуется и выполняется осознанно; добавьте --dry-run, где он есть.",
+      "reference": "docs/RUNBOOK.md#command-destructive"
+    },
+    {
+      "id": "command-db-destructive",
+      "class": "command-destructive",
+      "severity": "MEDIUM",
+      "match": {
+        "kind": "command",
+        "argv0": ["psql", "mysql", "mariadb", "sqlite3", "mongosh", "mongo", "redis-cli", "dropdb", "clickhouse-client"],
+        "args_regex_any": ["(?i)drop\\s+(?:database|table|schema)", "(?i)truncate\\s+table", "(?i)delete\\s+from", "(?i)flushall", "(?i)flushdb", "(?i)drop\\s+collection"]
+      },
+      "message": "Удаление базы, таблицы или всех ключей через клиент БД.",
+      "remediation": "Разрушительные запросы к БД выполняются по отдельной процедуре, не агентом.",
+      "reference": "docs/RUNBOOK.md#command-destructive"
+    },
+    {
+      "id": "command-env-persistence",
+      "class": "persistence",
+      "severity": "HIGH",
+      "match": {
+        "kind": "command",
+        "args_regex_any": ["(?:^|[;&|]\\s*)(?:export\\s+)?(?:LD_PRELOAD|LD_LIBRARY_PATH|BASH_ENV|ENV|PROMPT_COMMAND|PYTHONSTARTUP)="]
+      },
+      "message": "Установка переменной окружения, через которую выполняется произвольный код при запуске программ (LD_PRELOAD, BASH_ENV, PROMPT_COMMAND).",
+      "remediation": "Нужную библиотеку подключайте флагом конкретной команды, а не глобальной переменной.",
+      "reference": "docs/RUNBOOK.md#persistence"
+    },
+    {
+      "id": "command-systemd-run",
+      "class": "persistence",
+      "severity": "HIGH",
+      "match": {
+        "kind": "command",
+        "argv0": ["systemd-run", "loginctl"],
+        "args_regex_any": ["--on-(?:calendar|active|boot|unit-active)", "enable-linger"]
+      },
+      "message": "Планирование фоновой задачи или включение автозапуска пользовательских служб.",
+      "remediation": "Регулярные задачи настраивает человек через проверенную конфигурацию.",
+      "reference": "docs/RUNBOOK.md#persistence"
+    },
+    {
+      "id": "command-plugin-disable",
+      "class": "self-protection",
+      "severity": "CRITICAL",
+      "match": {
+        "kind": "command",
+        "argv0": ["claude"],
+        "args_contain_all": ["plugin"],
+        "args_contain_any": ["uninstall", "disable", "remove"]
+      },
+      "message": "Отключение или удаление плагина secure-dev означало бы снятие самого контроля.",
+      "remediation": "Плагинами управляет человек в собственном терминале.",
+      "reference": "docs/RUNBOOK.md#self-protection"
+    },
+    {
+      "id": "command-claude-bypass",
+      "class": "self-protection",
+      "severity": "HIGH",
+      "match": {
+        "kind": "command",
+        "argv0": ["claude"],
+        "args_regex_any": ["--dangerously-skip-permissions", "--permission-mode[ =]*(?:bypass|acceptEdits)", "--disallowedTools", "disableAllHooks"]
+      },
+      "message": "Запуск Claude Code в режиме обхода разрешений или с отключёнными хуками.",
+      "remediation": "Такой запуск выполняет человек осознанно.",
+      "reference": "docs/RUNBOOK.md#self-protection"
+    },
+    {
       "id": "git-filter-branch",
       "class": "git-destructive",
       "severity": "HIGH",
@@ -551,6 +953,32 @@
       "message": "Переписывание всей истории репозитория.",
       "remediation": "Операция согласовывается с командой и выполняется по отдельной процедуре: все клоны придётся пересоздать.",
       "reference": "docs/RUNBOOK.md#git-destructive"
+    },
+    {
+      "id": "config-trust-self-approve",
+      "class": "config-trust",
+      "severity": "HIGH",
+      "match": {
+        "kind": "command",
+        "argv0": ["secure-dev"],
+        "args_regex_any": ["^(?!(?:scan|report|doctor|export|-h|--help)(?: |$))"]
+      },
+      "message": "Подтверждение доверия к конфигурации репозитория — решение человека, агент его не принимает.",
+      "remediation": "Покажите отчёт `secure-dev scan` и попросите пользователя выполнить `secure-dev trust` в его собственном терминале.",
+      "reference": "docs/RUNBOOK.md#config-trust"
+    },
+    {
+      "id": "config-trust-self-approve-indirect",
+      "class": "config-trust",
+      "severity": "HIGH",
+      "match": {
+        "kind": "command",
+        "argv0": ["python*", "bash", "sh", "zsh", "env", "exec"],
+        "args_regex_any": ["(?:^| )\\S*secure-dev (?!(?:scan|report|doctor|export|-h|--help)(?: |$))"]
+      },
+      "message": "Подтверждение доверия к конфигурации репозитория — решение человека, агент его не принимает.",
+      "remediation": "Покажите отчёт `secure-dev scan` и попросите пользователя выполнить `secure-dev trust` в его собственном терминале.",
+      "reference": "docs/RUNBOOK.md#config-trust"
     }
   ]
 }

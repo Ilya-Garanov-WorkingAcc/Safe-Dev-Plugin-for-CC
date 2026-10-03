@@ -178,7 +178,44 @@ def handle_post(data, tool):
     hookio.passthrough()
 
 
-@hookio.guard(hookio.FAIL_OPEN, HOOK)
+_UNCHECKED = ("[secure-dev: вывод скрыт — проверка на секреты не завершилась за "
+              "отведённое время]")
+
+
+def _blank(node, depth=0):
+    """Вывод, который не удалось проверить: длинные строки заменяются
+    заглушкой, структура и короткие служебные поля сохраняются."""
+    if isinstance(node, str):
+        return node if len(node) <= 64 else _UNCHECKED
+    if depth > 8:
+        return _UNCHECKED
+    if isinstance(node, list):
+        return [_blank(item, depth + 1) for item in node]
+    if isinstance(node, dict):
+        return {key: _blank(value, depth + 1) for key, value in node.items()}
+    return node
+
+
+def on_timeout(data):
+    """Бюджет исчерпан. Пропустить непроверенное нельзя: балласт, на котором
+    зависает проверка, атакующий подмешивает сам."""
+    event = data.get("hook_event_name", "")
+    tool = data.get("tool_name", "") or ""
+    if event == "PreToolUse" and (tool in EGRESS_TOOLS or tool.startswith("mcp__")):
+        hookio.ask("PreToolUse",
+                   "\U0001f512 secure-dev: исходящий вызов {} не удалось проверить "
+                   "на секреты за отведённое время. Подтверди, если данные "
+                   "ожидаемы.".format(tool))
+    if event == "PostToolUse" and data.get("tool_response") is not None:
+        hookio.updated_output(
+            "PostToolUse", _blank(data.get("tool_response")),
+            additional="[security] Вывод {} не удалось проверить на секреты за "
+                       "отведённое время; он заменён заглушкой.".format(tool),
+            system="\U0001f512 secure-dev: вывод {} скрыт — проверка на секреты "
+                   "не уложилась во время.".format(tool))
+
+
+@hookio.guard(hookio.FAIL_OPEN, HOOK, on_timeout=on_timeout)
 def main():
     data = hookio.read()
     event = data.get("hook_event_name", "")

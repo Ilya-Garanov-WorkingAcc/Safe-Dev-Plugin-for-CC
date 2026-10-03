@@ -8,6 +8,7 @@ additionalContext: императивы в нём триггерят собст�
 инъекций, и текст показывается пользователю вместо применения.
 """
 
+import re
 import io
 import json
 import os
@@ -79,7 +80,8 @@ for field in ("plugin_version", "policy_version", "policy_sha256", "level",
               "rules_loaded", "settings_template_applied", "wsl", "user", "host",
               "session_source", "ts", "policy_tampered"):
     check("поле {}".format(field), field in beat, str(sorted(beat))[:60])
-check("версия плагина 2.x", str(beat.get("plugin_version", "")).startswith("2."),
+check("версия плагина задана (X.Y.Z)",
+      bool(re.match(r"^\d+\.\d+\.\d+", str(beat.get("plugin_version", "")))),
       str(beat.get("plugin_version")))
 check("правил загружено больше 30", beat.get("rules_loaded", 0) > 30,
       str(beat.get("rules_loaded")))
@@ -89,7 +91,7 @@ check("второй старт — вторая запись", len(heartbeats())
 
 print("=== B: состояние политики ===")
 check("состояние печати политики определено",
-      beat.get("policy_seal") in ("ok", "tampered", "unsealed"),
+      beat.get("policy_seal") in ("ok", "tampered", "code_tampered", "unsealed"),
       str(beat.get("policy_seal")))
 check("sha256 политики непустой", bool(beat.get("policy_sha256")))
 
@@ -136,6 +138,21 @@ result = run()          # D переиспользует `result` — верну
 print("=== D: баннер ===")
 check("баннер показан", "secure-dev" in result.get("systemMessage", ""),
       result.get("systemMessage", "")[:60])
+# Claude Code печатает первую строку systemMessage после префикса
+# «SessionStart:startup says: », а остальные — с отступом: рамка, начатая в
+# первой строке, съезжает вправо относительно боковой линии.
+banner_lines = result.get("systemMessage", "").split("\n")
+check("первая строка баннера — без рамки",
+      not any(ch in banner_lines[0] for ch in "┌│└─"), banner_lines[0][:60])
+check("рамка целиком в строках-продолжениях",
+      len(banner_lines) > 2 and banner_lines[1].startswith("┌")
+      and banner_lines[-1].startswith("└")
+      and all(line.startswith("│") for line in banner_lines[2:-1]),
+      " / ".join(line[:8] for line in banner_lines)[:70])
+check("верхняя и нижняя линии одной длины",
+      len(banner_lines) > 2 and len(banner_lines[1]) == len(banner_lines[-1]),
+      "{} != {}".format(len(banner_lines[1]) if len(banner_lines) > 1 else 0,
+                        len(banner_lines[-1])))
 with open(os.path.join(os.environ["HOME"], ".claude", "secure-dev.local.json"),
           "w", encoding="utf-8") as fh:
     json.dump({"ui": {"banner": False}}, fh)

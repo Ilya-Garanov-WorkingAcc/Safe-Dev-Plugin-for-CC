@@ -33,6 +33,7 @@ def heartbeat_fields(data):
         "policy_sha256": config.policy_sha256(),
         "policy_tampered": config.is_tampered(),
         "policy_seal": config.seal_status(),
+        "audit_last_seq": (audit.read_json(audit._chain_path(), {}) or {}).get("seq"),
         "level": config.level(),
         "rules_loaded": ruleset.loaded_count(),
         "settings_template_applied": config.settings_template_applied(),
@@ -43,13 +44,19 @@ def heartbeat_fields(data):
 
 
 def banner(fields, repo_line):
-    """Строка состояния для человека. Отключается через ui.banner."""
+    """Строка состояния для человека. Отключается через ui.banner.
+
+    Первая строка — заголовок без рамки: Claude Code печатает её после своего
+    префикса («SessionStart:startup says: »), а остальные — с отступом, и
+    рамка, начатая в первой строке, съезжает относительно боковой линии.
+    """
     export_label = {"none": "локально", "file": "сетевой каталог",
                     "http": "коллектор"}.get(
                         (config.audit_cfg().get("export") or {}).get("type", "none"),
                         "локально")
     return "\n".join([
-        "┌─ secure-dev {} {}".format(audit.plugin_version(), "─" * 28),
+        "secure-dev {}".format(audit.plugin_version()),
+        "┌" + "─" * 44,
         "│ Режим: {:<10} Правил: {}".format(
             fields["level"].upper(), fields["rules_loaded"]),
         "│ Политика: {}{}".format(

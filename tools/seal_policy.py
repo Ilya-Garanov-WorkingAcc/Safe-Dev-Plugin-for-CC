@@ -33,6 +33,26 @@ def policy_sha256():
         return hashlib.sha256(fh.read()).hexdigest()
 
 
+# Файлы, определяющие поведение плагина. Их подмена — обход (аудит 03.10.2026,
+# L4): раньше печать покрывала только policy.json, и агент, изменив правило в
+# rules/commands.json или строку в lib/, снимал контроль без следа.
+import glob
+
+
+def manifest_sha256():
+    entries = []
+    for pat in ("lib/*.py", "hooks/*.py", "rules/*.json", "policy.json",
+                "policy.schema.json", "bin/secure-dev", "hooks/hooks.json"):
+        for path in sorted(glob.glob(os.path.join(ROOT, pat))):
+            if path.endswith(".tests.py"):
+                continue
+            rel = os.path.relpath(path, ROOT)
+            with open(path, "rb") as fh:
+                entries.append("{}:{}".format(
+                    rel, hashlib.sha256(fh.read()).hexdigest()))
+    return hashlib.sha256("\n".join(sorted(entries)).encode("utf-8")).hexdigest()
+
+
 def _field(path, key):
     try:
         with open(path, encoding="utf-8") as fh:
@@ -58,14 +78,25 @@ def main(argv=None):
         except Exception:
             print("policy.lock.json отсутствует или нечитаем: политика не опечатана")
             return 1
-        if expected == actual:
-            print("Совпадает: {}".format(actual))
+        try:
+            with open(LOCK, encoding="utf-8") as fh:
+                expected_code = json.load(fh).get("code_sha256")
+        except Exception:
+            expected_code = None
+        actual_code = manifest_sha256()
+        if expected == actual and expected_code == actual_code:
+            print("Совпадает: policy {} code {}".format(actual[:12], actual_code[:12]))
             return 0
+        if expected_code != actual_code:
+            print("РАСХОЖДЕНИЕ кода плагина\n  эталон:  {}\n  фактич.: {}".format(
+                expected_code, actual_code))
+            return 1
         print("РАСХОЖДЕНИЕ\n  эталон:  {}\n  фактич.: {}".format(expected, actual))
         return 1
 
     payload = {
         "policy_sha256": actual,
+        "code_sha256": manifest_sha256(),
         "policy_version": _field(POLICY, "policy_version"),
         "plugin_version": _field(
             os.path.join(ROOT, ".claude-plugin", "plugin.json"), "version"),

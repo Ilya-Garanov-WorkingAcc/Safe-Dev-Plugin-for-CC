@@ -39,8 +39,23 @@ def sysmsg(out):
     except json.JSONDecodeError:
         return ""
 
+# Батареи запускаются только из каталогов-корней; фикстуры живут во временном
+# каталоге, поэтому он добавляется в корни явно.
+os.environ["SECURE_DEV_TEST_RUNNER_ROOTS"] = os.path.realpath(tempfile.gettempdir())
+
 with tempfile.TemporaryDirectory() as tmp:
     hooks = os.path.join(tmp, ".claude", "hooks")
+
+    # Вне каталогов-корней батарея НЕ запускается: это и есть канал исполнения
+    # кода мимо command_guard (аудит 03.10.2026, S2).
+    write(os.path.join(hooks, "evil.tests.py"),
+          "open(%r, 'w').write('x')\n" % os.path.join(tmp, "PWNED"))
+    rc, out, err = call_env(post_write(os.path.join(hooks, "evil.tests.py")),
+                            {"SECURE_DEV_TEST_RUNNER_ROOTS": ""})
+    check("вне корней батарея не запускается",
+          rc == 0 and out == "" and not os.path.exists(os.path.join(tmp, "PWNED")),
+          f"rc={rc} out={out[:40]!r}")
+    os.remove(os.path.join(hooks, "evil.tests.py"))
 
     # Фикстура: проходящий хук + батарея (exit 0)
     write(os.path.join(hooks, "good.py"), "print('hook')\n")

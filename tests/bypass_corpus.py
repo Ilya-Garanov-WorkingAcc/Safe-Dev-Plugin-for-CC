@@ -467,5 +467,77 @@ SYNC_OK = [
     "docker system prune -f",
 ]
 
+# --- Heredoc: тело — данные или код (2.1.2) --------------------------------
+# До 2.1.2 парсер не знал heredoc и разбирал тело построчно как команды:
+# запись markdown через `cat > f.md <<'EOF'` давала ask («команда собирается
+# динамически», «слишком много команд» на большой таблице) или deny, если в
+# тексте встречалось `rm -rf ~`. Тело — данные только в одном доказуемом
+# случае: cat/tee, чей stdout перенаправлен в статически известный файл.
+_DOC = ("# Бренд Momi — публичная картина (02.10.2026)\n\n"
+        "Пометки: [П] прочитано; [К] только сниппет; `code` и $(подстановка)\n"
+        "$VAR в начале строки; дальше пример из runbook:\n"
+        "rm -rf ~\n"
+        "sudo rm -rf / && history -c\n"
+        "f() { rm -rf /; }; f\n"
+        "| Линейка | Позиционирование | Форматы |\n|---|---|---|\n"
+        "| Ultra Care | двойной слой, до 12 ч | липучки (вкл. NB), трусики M-XL |\n")
+_TABLE = "".join("| Sales {} | 1,7% | 2,1% | 10,2% | 5,7% | 6,5% | 0,0% |\n".format(i)
+                 for i in range(80))
+
+# Не должны давать ни deny, ни ask.
+HEREDOC_OK = [
+    ("markdown в файл",        "cat > spec.md <<'EOF'\n" + _DOC + "EOF"),
+    ("cd && cat",              "cd docs && cat > 02_бренд.md <<'EOF'\n" + _DOC + "EOF"),
+    ("большая таблица",        "cat > slides.md <<'EOF'\n" + _TABLE + "EOF"),
+    ("дозапись",               "cat >> notes.txt <<'EOF'\n" + _DOC + "EOF"),
+    ("редирект после <<",      "cat <<'EOF' > spec.md\n" + _DOC + "EOF"),
+    ("двойные кавычки",        "cat > spec.md <<\"EOF\"\n" + _DOC + "EOF"),
+    ("экранированный разделитель", "cat > spec.md <<\\EOF\n" + _DOC + "EOF"),
+    ("<<- с табами",           "cat > spec.md <<-'EOF'\n\t$X y\n\trm -rf ~\n\tEOF"),
+    ("tee > /dev/null",        "tee spec.md > /dev/null <<'EOF'\n" + _DOC + "EOF"),
+    ("без кавычек, простой текст", "cat > spec.md <<EOF\nплан работ на $(date +%F)\nrm -rf ~\nEOF"),
+    ("команда после heredoc",  "cat > spec.md <<'EOF'\n" + _DOC + "EOF\nwc -l spec.md && git add spec.md"),
+    ("два heredoc подряд",     "cat > a.md <<'A'; cat > b.md <<'B'\nrm -rf ~\nA\n$X\nB"),
+    ("python без запуска команд", "python3 - <<'PY'\nimport json\nprint(json.dumps({'a': 1}))\nPY"),
+]
+
+# Тело — код либо случай не доказуем: минимум ask.
+HEREDOC_BLOCK = [
+    ("bash из heredoc",        "bash <<'EOF'\nrm -rf /\nEOF"),
+    ("sh без кавычек",         "sh <<EOF\nrm -rf /\nEOF"),
+    ("bash -s",                "bash -s <<'EOF'\nrm -rf /\nEOF"),
+    ("source /dev/stdin",      "source /dev/stdin <<'EOF'\nrm -rf /\nEOF"),
+    ("cat | bash",             "cat <<'EOF' | bash\nrm -rf /\nEOF"),
+    ("cat | sudo sh",          "cat <<'EOF' | sudo sh\nrm -rf /\nEOF"),
+    ("подоболочка | bash",     "(cat <<'EOF'\nrm -rf /\nEOF\n) | bash"),
+    ("if … fi | bash",         "if true; then cat <<'EOF'\nrm -rf /\nEOF\nfi | bash"),
+    ("bash -c \"$(cat <<)\"",  "bash -c \"$(cat <<'EOF'\nrm -rf /\nEOF\n)\""),
+    ("stdout в stderr | bash", "(cat >&2 <<'EOF'\nrm -rf /\nEOF\n) 2>&1 | bash"),
+    ("/dev/stdout | bash",     "(cat > /dev/stdout <<'EOF'\nrm -rf /\nEOF\n) | bash"),
+    ("process substitution",   "cat > >(bash) <<'EOF'\nrm -rf /\nEOF"),
+    ("цель из переменной",     "cat > \"$OUT\" <<'EOF'\nrm -rf /\nEOF"),
+    ("запись .sh",             "cat > run.sh <<'EOF'\nrm -rf /\nEOF"),
+    ("tee в .sh",              "tee run.sh > /dev/null <<'EOF'\nrm -rf /\nEOF"),
+    ("shebang без расширения", "cat > run <<'EOF'\n#!/bin/sh\nrm -rf /\nEOF"),
+    ("записал и запустил",     "cat > run <<'EOF'\nrm -rf /\nEOF\nbash run"),
+    ("записал, chmod, запустил", "cat > run <<'EOF'\nrm -rf /\nEOF\nchmod +x run && ./run"),
+    ("записал и source",       "cat > run <<'EOF'\nrm -rf /\nEOF\n. ./run"),
+    ("записал, sh < файл",     "cat > run <<'EOF'\nrm -rf /\nEOF\nsh < run"),
+    ("записал, переименовал",  "cat > run <<'EOF'\nrm -rf /\nEOF\nmv run go; ./go"),
+    ("подстановка в теле",     "cat > a.md <<EOF\n$(rm -rf /)\nEOF"),
+    ("обратные кавычки в теле", "cat > a.md <<EOF\n`rm -rf /`\nEOF"),
+    ("команда после heredoc",  "cat > a.md <<'EOF'\nтекст\nEOF\nrm -rf /"),
+    ("команда после <<-",      "cat > a.md <<-'EOF'\n\tтекст\n\tEOF\nrm -rf /"),
+    ("второй heredoc — bash",  "cat > a.md <<'A'; bash <<'B'\nтекст\nA\nrm -rf /\nB"),
+    ("арифметика, не heredoc", "((cat<<EOF))\nrm -rf /\nEOF"),
+    ("<< в комментарии",       "cat > a.md # <<'EOF'\nrm -rf /\nEOF"),
+    ("here-string, не heredoc", "cat > a.md <<<'EOF'\nrm -rf /\nEOF"),
+    ("алиас на bash",          "alias c=bash; c <<'EOF'\nrm -rf /\nEOF"),
+    ("нет закрывающего разделителя", "cat > a.md <<'EOF'\nrm -rf /"),
+    ("python os.system",       "python3 - <<'PY'\nimport os\nos.system('rm -rf /')\nPY"),
+    ("node child_process",     "node <<'JS'\nrequire('child_process').execSync('rm -rf /')\nJS"),
+    ("запись в .bashrc",       "cat >> ~/.bashrc <<'EOF'\nexport PATH=/tmp/x:$PATH\nEOF"),
+]
+
 ALL_BLOCKING = (RM_ROOT + SUDO + DESTRUCTIVE + GIT_DESTRUCTIVE + PARSER_GAPS
-                + NEW_GAPS + SYNC_ROOT + SYNC_ASK)
+                + NEW_GAPS + SYNC_ROOT + SYNC_ASK + HEREDOC_BLOCK)

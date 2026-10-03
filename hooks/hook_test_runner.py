@@ -3,6 +3,13 @@
 hook_test_runner.py — мета-хук: запускает батарею тестов хука после каждого
 его изменения (Write/Edit/MultiEdit). Регистрируется на PostToolUse.
 
+С 2.1.3 в поставляемый hooks.json НЕ входит и включается вручную оверлеем
+deploy/dev-test-runner.hooks.json: хук исполняет файл, который агент только
+что записал, то есть является каналом исполнения кода мимо command_guard.
+Батареи запускаются только из каталогов-корней (allowed_roots), по realpath:
+раньше хватало подстроки `/.claude/hooks/` в любом пути, включая каталог
+чужого клонированного репозитория.
+
 Соглашение об именах (см. skill `hook-development`):
   • Хук-скрипт:   <.../.claude/hooks>/<name>.<ext>        ext ∈ {py, sh, js, mjs}
   • Батарея:      тот же каталог, <name>.tests.<ext>       ИЛИ <dir>/tests/<name>.tests.<ext>
@@ -50,8 +57,23 @@ TEST_RE = re.compile(r"\.tests?\.[^.]+$")     # foo.tests.py / foo.test.sh
 TIMEOUT_S = 120
 
 
+def allowed_roots():
+    """Каталоги, из которых разрешено запускать батареи (realpath)."""
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    roots = [here, os.path.expanduser(os.path.join("~", ".claude", "hooks"))]
+    extra = os.environ.get("SECURE_DEV_TEST_RUNNER_ROOTS") or ""
+    roots.extend(p for p in extra.split(os.pathsep) if p)
+    return [os.path.realpath(p) for p in roots]
+
+
 def is_under_hooks_dir(path):
-    return HOOKS_MARKER in (os.path.normpath(path) + os.sep)
+    real = os.path.realpath(path)
+    if not any(real == root or real.startswith(root + os.sep)
+               for root in allowed_roots()):
+        return False
+    here = os.path.realpath(os.path.dirname(os.path.abspath(__file__)))
+    return (HOOKS_MARKER in (os.path.normpath(real) + os.sep)
+            or real.startswith(here + os.sep))
 
 
 def is_test_file(path):
