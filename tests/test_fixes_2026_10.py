@@ -117,6 +117,33 @@ for label, command in [
 # Чтение секрета через stdin-редирект читателем — по-прежнему блок.
 check("FP-3 base64 < id_rsa блок", blocked(bash("base64 < " + IDRSA)), bash("base64 < " + IDRSA))
 
+PLUGINFILE = os.path.join(PLUGINDIR, "policy.json")
+
+print("=== FP-2: чтение защищённого пути не считается записью ===")
+# Утилиты, которые пишут только через редирект, не должны блокироваться при
+# чтении операнда.
+for label, command in [
+        ("cat файла плагина",       "cat " + PLUGINFILE),
+        ("jq по файлу плагина",     "jq . " + PLUGINFILE),
+        ("python json.tool плагин", "python3 -m json.tool " + PLUGINFILE),
+        ("cat .git/config",         "cat " + GITCFG),
+        ("sed -n по .bashrc",       "sed -n 1,5p " + BASHRC),
+        ("cp файла плагина (чтение источника)",
+                                    "cp " + PLUGINFILE + " " + os.path.join(WORK, "copy.json"))]:
+    d = bash(command)
+    check("FP-2 чтение не блок: {}".format(label), not blocked(d), d)
+
+print("=== FP-2 (контроль): запись в защищённый путь по-прежнему блок ===")
+for label, command in [
+        ("tee в файл плагина",      "echo x | tee " + PLUGINFILE),
+        ("sed -i по файлу плагина", "sed -i s/a/b/ " + PLUGINFILE),
+        ("cp в .bashrc (назначение)", "cp " + os.path.join(WORK, "src") + " " + BASHRC),
+        ("mv в authorized_keys",    "mv " + os.path.join(WORK, "src") + " " + AUTH)]:
+    d = bash(command)
+    check("FP-2 запись блок: {}".format(label), blocked(d), d)
+# Чтение настоящего секрета читателем по-прежнему блок.
+check("FP-2 cat id_rsa блок", blocked(bash("cat " + IDRSA)), bash("cat " + IDRSA))
+
 shutil.rmtree(TMP, ignore_errors=True)
 print("\nSUMMARY:", "ALL PASSED" if not FAILS else "FAILED({}) {}".format(len(FAILS), FAILS))
 sys.exit(1 if FAILS else 0)

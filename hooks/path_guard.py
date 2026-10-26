@@ -113,7 +113,9 @@ def _match_bash(command, cwd):
                 if hit:
                     return rule, hit
             if writers and cmd.argv0 in writers:
-                hit = _bash_hit(rule, cmd.operands, base, "write")
+                # Только операнды, в которые идёт запись: источник `cp`/`mv` и
+                # `sed` без -i читают, а не пишут (FP-2).
+                hit = _bash_hit(rule, cmdparse.write_targets(cmd), base, "write")
                 if hit:
                     return rule, hit
             if rule["match"].get("write_tools"):

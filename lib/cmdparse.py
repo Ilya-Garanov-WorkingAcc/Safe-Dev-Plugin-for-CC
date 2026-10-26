@@ -1754,6 +1754,43 @@ def is_mktemp_path(operand):
             and ".." not in operand.split("/"))
 
 
+# Утилиты, которые пишут в ПОСЛЕДНИЙ позиционный операнд (назначение); их
+# первые операнды — источники, то есть чтение (`cp secret dst`, `mv a b`).
+_DEST_LAST_WRITERS = frozenset({"cp", "mv", "install", "ln"})
+
+
+def write_targets(cmd):
+    """Операнды, в которые команда ЗАПИСЫВАЕТ (а не читает как источник).
+
+    Нужно, чтобы `cp ~/.ssh/id_rsa /tmp/` не считалось записью в id_rsa, а
+    `sed -n …` вообще не считалось записью (FP-2, 26.10.2026). Цели записи
+    через редирект (`> f`) сюда не входят — они в `Cmd.write_redirects`.
+    """
+    argv0 = _basename(cmd.argv0)
+    ops = [o for o in cmd.operands if not o.startswith("-")]
+    if argv0 == "sed":
+        return ops if _sed_in_place(cmd.flags) else []
+    if argv0 == "dd":
+        return [a.split("=", 1)[1] for a in cmd.operands
+                if a.startswith("of=") and len(a) > 3]
+    if argv0 in _DEST_LAST_WRITERS:
+        return ops[-1:] if ops else []
+    # tee/truncate/shred/patch/rm и прочие: пишут (или удаляют) свои операнды.
+    return ops
+
+
+def _sed_in_place(flags):
+    """sed пишет в файл только с -i / --in-place (в т. ч. `-i.bak`, `-ni`)."""
+    for f in flags:
+        if f.startswith("--in-place"):
+            return True
+        if f.startswith("-") and not f.startswith("--"):
+            short = f[1:].split("=", 1)[0].split(".", 1)[0]
+            if "i" in short:
+                return True
+    return False
+
+
 def outside_cwd(operand, cwd):
     """Операнд указывает за пределы рабочего каталога.
 

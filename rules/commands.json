@@ -195,7 +195,7 @@
       "match": {
         "kind": "command",
         "argv0": ["tee", "sed", "cp", "mv", "install", "truncate", "ln", "dd", "patch"],
-        "target_glob": ["**/.bashrc", "**/.bash_profile", "**/.zshrc",
+        "write_target_glob": ["**/.bashrc", "**/.bash_profile", "**/.zshrc",
                         "**/.zprofile", "**/.profile", "**/.bash_aliases",
                         "**/.envrc", "**/.zshenv", "/etc/profile.d/**"]
       },

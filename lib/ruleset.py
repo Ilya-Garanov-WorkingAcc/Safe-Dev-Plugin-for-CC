@@ -265,6 +265,15 @@ def match_command(cmd, rule, ctx=None):
         if not any(any_glob(tg, t) for t in targets):
             return False
 
+    wtg = m.get("write_target_glob")
+    if wtg:
+        # Как target_glob, но только по операндам, в которые идёт ЗАПИСЬ:
+        # источник `cp`/`mv` и `sed` без -i читают цель, а не пишут в неё (FP-2).
+        targets = list(ctx.get("write_targets") or ()) + \
+            list(ctx.get("expanded_write_targets") or ())
+        if not any(any_glob(wtg, t) for t in targets):
+            return False
+
     rg = m.get("redirect_glob")
     if rg:
         # `echo evil >> ~/.bashrc` — цель не операнд, а перенаправление;

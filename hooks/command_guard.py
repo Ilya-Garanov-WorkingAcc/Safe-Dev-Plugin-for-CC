@@ -89,6 +89,11 @@ def build_context(cmd, cwd):
     # Только цели записи-редиректа: `echo x 2>&1` не пишет в файл «1» (FP-3).
     expanded_redirects = [cmdparse.expand_operand(r, base)
                           for r in cmd.write_redirects[:MAX_EXPANDED_OPERANDS]]
+    # Операнды, в которые команда ПИШЕТ (назначение cp/mv, sed -i): источник
+    # cp/mv и sed без -i читают, а не пишут (FP-2).
+    write_targets = cmdparse.write_targets(cmd)[:MAX_EXPANDED_OPERANDS]
+    expanded_write_targets = [cmdparse.expand_operand(_target_dir(t), base)
+                              for t in write_targets]
     positional = [op for op in cmd.operands if not op.startswith("-")]
     # Назначение — последний позиционный операнд (rsync, cp, mv, tar -C — нет,
     # у tar это значение флага, см. правило по args_regex_any).
@@ -101,6 +106,8 @@ def build_context(cmd, cwd):
     return {
         "expanded_operands": expanded,
         "expanded_redirects": expanded_redirects,
+        "write_targets": list(write_targets),
+        "expanded_write_targets": expanded_write_targets,
         "has_operand_outside_cwd": truncated or any(
             _outside(exp, base) for _, exp in pairs),
         "has_root_target": any(_is_root_target(raw, exp, base) for raw, exp in pairs),
