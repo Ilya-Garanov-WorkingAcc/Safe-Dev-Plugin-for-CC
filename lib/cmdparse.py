@@ -213,6 +213,36 @@ INTERPRETER_FS_RE = re.compile(
     r"\.unlink\s*\(|\.rmdir\s*\(|"
     r"\bunlink\b|\brmdir\s*\(|\btruncate\s*\(")
 
+# awk, исполняющий shell: пайп в команду (`print … | "sh"`, `"cmd" | getline`).
+# `system(...)` ловит INTERPRETER_EXEC_RE через _interpreter_code (G3).
+AWK_PIPE_RE = re.compile(r'\|\s*"|\|\s*getline')
+# sed, исполняющий shell: команда `e` (`1e cmd`, `e cmd`) и флаг `e` у s///.
+# Скрипт сначала режется на сегменты по `;{}` и переводам строк, затем в
+# каждом сегменте якорем снимается необязательный адрес — это линейно и не
+# даёт катастрофического бэктрекинга на входе из пробелов (бюджет regex).
+SED_ADDR_RE = re.compile(
+    r'^\s*(?:\d+|\$|/[^/\n]{0,200}/)?(?:,\s*(?:\d+|\$|/[^/\n]{0,200}/))?\s*')
+SED_S_EXEC_RE = re.compile(
+    r'[sy](.)(?:(?!\1)[^\n]){0,300}\1(?:(?!\1)[^\n]){0,300}\1[gpiImMwe0-9]*e')
+
+
+def _sed_executes(cmd):
+    """sed запускает shell: команда `e` или флаг `e` у s///y///."""
+    cands = list(cmd.operands)
+    for fl in ("-e", "--expression", "-i", "--in-place"):
+        v = _flag_value(cmd.args, (fl,))
+        if v:
+            cands.append(v)
+    for c in cands:
+        c = c[:1000]
+        if SED_S_EXEC_RE.search(c):
+            return True
+        for seg in re.split(r'[;{}\n]', c):
+            rest = seg[SED_ADDR_RE.match(seg).end():]
+            if rest[:1] == "e" and (len(rest) == 1 or rest[1] in " \t"):
+                return True
+    return False
+
 # Heredoc: кому достаётся тело (см. _classify_heredoc).
 HEREDOC_DATA = "data"          # текст, уходящий в файл: командами не является
 HEREDOC_CODE = "code"          # читает шелл либо получатель не доказуем
@@ -1447,13 +1477,26 @@ def _expand(cmd, args, depth, state, has_heredoc=False):
     if argv0 == "find" and "--exec" in cmd.flags:
         exec_cmd = _find_exec_command(args)
         if exec_cmd:
-            # `{}` — цель, которую find подставляет для каждого найденного
-            # файла: статически известен только плейсхолдер (как `-I{}` у
-            # xargs), не то, что реально будет удалено. Тот же маркер `$()`,
-            # что и у обычной подстановки.
-            line = " ".join(_quote(a) for a in exec_cmd)
-            if "{}" in exec_cmd:
-                line = line.replace("{}", "{}$()")
+            # Область действия `-exec` — дерево под корнями поиска find, а не
+            # плейсхолдер `{}`. Подставляя корни вместо `{}`, получаем реальную
+            # цель: `find ~ -exec rm {} +` → `rm ~` (ловится delete-root),
+            # `find . -exec rm {} +` → `rm .` (чистка в cwd, не блокируется).
+            # Так закрыт G2 (нерекурсивное удаление через find мимо правил) без
+            # ложного ask на чистке внутри проекта.
+            roots = _find_search_roots(args) or ["."]
+            parts = []
+            for a in exec_cmd:
+                if a == "{}":
+                    parts.extend(roots)
+                else:
+                    parts.append(a)
+            if "{}" not in exec_cmd:
+                # Цель не подставляется явно (`-exec rm -rf {} +` без {} —
+                # редко; либо `-exec sh -c '…'`): корни добавляем только для
+                # прямых файловых утилит, чтобы не портить `sh -c`.
+                if _basename(exec_cmd[0]) in _FIND_DIRECT_TARGETS:
+                    parts.extend(roots)
+            line = " ".join(_quote(a) for a in parts)
             out.extend(_parse_text(line, depth + 1, cmd.origin, state))
 
     # --- утилиты, исполняющие строку с командой ---------------------------
@@ -1523,6 +1566,17 @@ def _expand(cmd, args, depth, state, has_heredoc=False):
         code = _flag_value(args, ("-c", "-e", "-E", "--eval", "--print"))
         if code:
             out.extend(_interpreter_code(code, depth, state))
+
+    if argv0 == "awk" and not _flag_value(args, ("-f", "--file")):
+        # Программа awk — первый позиционный операнд (при -f она в файле).
+        prog = cmd.operands[0] if cmd.operands else None
+        if prog:
+            out.extend(_interpreter_code(prog, depth, state))  # system("…")
+            if AWK_PIPE_RE.search(prog):
+                state["warnings"].append("interpreter_exec")
+
+    if argv0 == "sed" and _sed_executes(cmd):
+        state["warnings"].append("interpreter_exec")
     return out, shell_stdin
 
 
@@ -1595,14 +1649,49 @@ def _xargs_replacement(args):
 def _find_exec_command(args):
     """Команда внутри `find ... -exec CMD {} ;` (TS.md §7.2)."""
     for i, arg in enumerate(args):
-        if arg in ("-exec", "-execdir"):
+        if arg in ("-exec", "-execdir", "--exec"):
             parts = []
             for later in args[i + 1:]:
-                if later in (";", "+"):
+                if later in (";", "+", "\\;"):
                     break
                 parts.append(later)
             return parts or None
     return None
+
+
+# Прямые файловые утилиты в `-exec`: к ним можно дописать корни поиска как
+# цель, даже если `{}` опущен. `sh`/`bash`/`xargs` сюда не входят — их код
+# разбирается отдельно и подстановка корней его бы исказила.
+_FIND_DIRECT_TARGETS = frozenset({
+    "rm", "rmdir", "unlink", "shred", "truncate", "mv", "cp", "chmod",
+    "chown", "dd", "tee"})
+# Глобальные опции find перед корнями поиска.
+_FIND_GLOBAL_OPTS = frozenset({"-H", "-L", "-P"})
+
+
+def _find_search_roots(args):
+    """Корни поиска find: операнды до первого предиката (`-name`, `(`, …)."""
+    roots = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in _FIND_GLOBAL_OPTS:
+            i += 1
+            continue
+        if a == "-D" or a == "-O":           # -D takes value; -O level
+            i += 2 if a == "-D" else 1
+            continue
+        if a.startswith("-O"):               # -Olevel склеенно
+            i += 1
+            continue
+        break
+    while i < len(args):
+        a = args[i]
+        if a.startswith("-") or a in ("(", ")", "!", ","):
+            break
+        roots.append(a)
+        i += 1
+    return roots
 
 
 def _unwrap(argv0, args, spec=None):

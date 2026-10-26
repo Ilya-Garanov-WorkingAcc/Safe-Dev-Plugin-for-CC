@@ -178,6 +178,42 @@ for label, command in BENIGN:
 doc = 'cat > %s <<EOF\nimport shutil; shutil.rmtree("/")\nEOF' % os.path.join(WORK, "readme.md")
 check("G1 heredoc-данные не блок", not blocked(bash(doc)), bash(doc))
 
+print("=== G2: find -exec/-execdir с нерекурсивным удалением ===")
+OUTSIDE = os.path.join(TMP, "other")
+for label, command in [
+        ("find ~ -exec rm {} +",     "find " + HOME + " -type f -exec rm {} +"),
+        ("find вне cwd -exec trunc",  "find " + OUTSIDE + " -exec trunc"+"ate -s0 {} ;"),
+        ("find вне cwd -execdir rm",  "find " + OUTSIDE + " -execdir rm {} +"),
+        ("find / -exec rm -rf",       "find / -exec rm -rf {} ;")]:
+    d = bash(command)
+    check("G2 блок: {}".format(label), blocked(d), d)
+
+print("=== G2 (контроль): find -exec для чистки в cwd не блокируется ===")
+for label, command in [
+        ("find . -exec rm (pyc)",    "find . -name '*.pyc' -exec rm {} +"),
+        ("find build -exec rm",      "find build -type f -exec rm {} ;")]:
+    d = bash(command)
+    check("G2 не блок (чистка в cwd): {}".format(label), not blocked(d), d)
+
+print("=== G3: awk/sed, исполняющие shell ===")
+for label, command in [
+        ("awk system()",   "awk 'BEGIN{system(\"rm -rf /tmp/x\")}'"),
+        ("awk pipe в sh",   "awk 'BEGIN{print \"rm -rf /\" | \"sh\"}'"),
+        ("sed e-команда",   "sed '1e rm -rf /tmp/x' f"),
+        ("sed s///e флаг",  "sed 's/a/b/e' f")]:
+    d = bash(command)
+    check("G3 блок: {}".format(label), blocked(d), d)
+
+print("=== G3 (контроль): обычные awk/sed не блокируются ===")
+for label, command in [
+        ("awk print",      "awk '{print $1}' data.txt"),
+        ("awk -F",         "awk -F, '{print $2}' data.csv"),
+        ("sed -n p",       "sed -n '1,5p' file.txt"),
+        ("sed s///g",      "sed -i 's/foo/bar/g' README.md"),
+        ("sed s/e/x/",     "sed 's/e/x/g' file.txt")]:
+    d = bash(command)
+    check("G3 не блок: {}".format(label), not blocked(d), d)
+
 shutil.rmtree(TMP, ignore_errors=True)
 print("\nSUMMARY:", "ALL PASSED" if not FAILS else "FAILED({}) {}".format(len(FAILS), FAILS))
 sys.exit(1 if FAILS else 0)
