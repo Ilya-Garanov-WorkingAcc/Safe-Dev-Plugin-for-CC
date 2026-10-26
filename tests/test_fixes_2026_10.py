@@ -78,6 +78,10 @@ def bash(command, cwd=WORK):
                 _run(pg, "Bash", {"command": command}, cwd))
 
 
+def tool_pg(name, tool_input, cwd=WORK):
+    return _run(pg, name, tool_input, cwd)
+
+
 def blocked(d):
     return d in ("deny", "ask")
 
@@ -396,6 +400,18 @@ for label, command in [
         ("chmod файла",       "chmod 644 src/app.py")]:
     d = bash(command)
     check("G5 не блок (в cwd): {}".format(label), not blocked(d), d)
+
+print("=== FP-12: MEMORY-заметки не помечаются как учётные данные ===")
+MEMDIR = os.path.join(HOME, ".claude", "projects", "proj", "memory")
+os.makedirs(MEMDIR, exist_ok=True)
+MEMFILE = os.path.join(MEMDIR, "MEMORY.md")
+HISTFILE = os.path.join(HOME, ".claude", "projects", "proj", "history.jsonl")
+check("FP-12 Read MEMORY.md не блок",
+      not blocked(tool_pg("Read", {"file_path": MEMFILE})), MEMFILE)
+check("FP-12 cat MEMORY.md не блок", not blocked(bash("cat " + MEMFILE)))
+# Контроль: прочие файлы projects/ (транскрипты) по-прежнему защищены.
+check("FP-12 история projects/ блок (контроль)",
+      blocked(tool_pg("Read", {"file_path": HISTFILE})), HISTFILE)
 
 shutil.rmtree(TMP, ignore_errors=True)
 print("\nSUMMARY:", "ALL PASSED" if not FAILS else "FAILED({}) {}".format(len(FAILS), FAILS))

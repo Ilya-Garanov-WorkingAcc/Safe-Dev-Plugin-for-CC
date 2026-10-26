@@ -111,6 +111,7 @@
       "match": {
         "kind": "path",
         "path_glob": ["**/.claude/.credentials.json", "**/.claude/statsig/**", "**/.config/claude/**", "**/.claude.json", "**/.claude/history.jsonl", "**/.claude/projects/**", "**/.claude/shell-snapshots/**"],
+        "path_glob_not": ["**/.claude/projects/*/memory/**", "**/.claude/projects/*/memory"],
         "tools": ["Read", "Glob", "Grep", "Bash"],
         "bash_readers": [".", "ag", "awk", "base32", "base64", "bat", "batcat", "cat", "column", "cp", "curl", "cut", "dd", "egrep", "emacs", "fold", "gpg", "grep", "gunzip", "gzip", "head", "hexdump", "install", "jq", "less", "ln", "more", "mv", "nano", "nc", "ncat", "nl", "node", "nvim", "od", "openssl", "paste", "perl", "php", "python", "python2", "python3", "rg", "rsync", "ruby", "scp", "sed", "shred", "sort", "source", "strings", "tac", "tail", "tar", "truncate", "uniq", "vi", "vim", "wget", "xxd", "yq", "zip"]
       },
