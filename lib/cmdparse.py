@@ -1868,6 +1868,22 @@ def is_mktemp_path(operand):
             and ".." not in operand.split("/"))
 
 
+# Корни временных каталогов: работа внутри них (создание, удаление) — обычное
+# дело (pytest, сборка, scratchpad), а не разрушение вне cwd (FP-7). Сам корень
+# (`/tmp`) под это НЕ подпадает — только путь ВНУТРИ него.
+_TEMP_ROOTS = ("/tmp/", "/var/tmp/", "/dev/shm/", "/private/tmp/",
+               "/private/var/tmp/")
+
+
+def is_temp_path(operand):
+    """Операнд — путь внутри стандартного временного каталога."""
+    if not operand or ".." in operand.split("/"):
+        return False
+    return (is_mktemp_path(operand)
+            or any(operand.startswith(r) and len(operand) > len(r)
+                   for r in _TEMP_ROOTS))
+
+
 # Утилиты, которые пишут в ПОСЛЕДНИЙ позиционный операнд (назначение); их
 # первые операнды — источники, то есть чтение (`cp secret dst`, `mv a b`).
 _DEST_LAST_WRITERS = frozenset({"cp", "mv", "install", "ln"})

@@ -179,7 +179,7 @@ doc = 'cat > %s <<EOF\nimport shutil; shutil.rmtree("/")\nEOF' % os.path.join(WO
 check("G1 heredoc-данные не блок", not blocked(bash(doc)), bash(doc))
 
 print("=== G2: find -exec/-execdir с нерекурсивным удалением ===")
-OUTSIDE = os.path.join(TMP, "other")
+OUTSIDE = "/opt/scan-area"      # вне cwd и не временный каталог
 for label, command in [
         ("find ~ -exec rm {} +",     "find " + HOME + " -type f -exec rm {} +"),
         ("find вне cwd -exec trunc",  "find " + OUTSIDE + " -exec trunc"+"ate -s0 {} ;"),
@@ -350,6 +350,52 @@ SECRET = [
 ]
 for label, text in SECRET:
     check("FP-1 редактируется (секрет): {}".format(label), redacted(text), text)
+
+print("=== FP-7: удаление во временных каталогах не блокируется ===")
+for label, command in [
+        ("rm -rf /tmp/pytest",  "rm -rf /tmp/pytest-of-user/abc123"),
+        ("rm /tmp/x",           "rm /tmp/x"),
+        ("rm -rf /var/tmp",     "rm -rf /var/tmp/build-xyz")]:
+    d = bash(command)
+    check("FP-7 не блок: {}".format(label), not blocked(d), d)
+for label, command in [
+        ("rm -rf /etc/foo",     "rm -rf /etc/foo"),
+        ("rm -rf /opt/app",     "rm -rf /opt/app/data")]:
+    d = bash(command)
+    check("FP-7 блок (контроль): {}".format(label), blocked(d), d)
+
+print("=== FP-8: служебные файлы git (index.lock, *.sample) ===")
+for label, command in [
+        ("rm index.lock",   "rm -f .git/index.lock"),
+        ("rm sample hook",  "rm .git/hooks/pre-commit.sample")]:
+    d = bash(command)
+    check("FP-8 не блок: {}".format(label), not blocked(d), d)
+for label, command in [
+        ("rm .git/config",  "rm .git/config"),
+        ("rm -rf .git",     "rm -rf .git")]:
+    d = bash(command)
+    check("FP-8 блок (контроль): {}".format(label), blocked(d), d)
+
+print("=== FP-10: LD_LIBRARY_PATH не блок, LD_PRELOAD блок ===")
+check("FP-10 LD_LIBRARY_PATH не блок",
+      not blocked(bash("export LD_LIBRARY_PATH=/opt/lib")),
+      bash("export LD_LIBRARY_PATH=/opt/lib"))
+check("FP-10 LD_PRELOAD блок",
+      blocked(bash("export LD_PRELOAD=/tmp/x.so")),
+      bash("export LD_PRELOAD=/tmp/x.so"))
+
+print("=== G5: chmod -R / chown -R вне cwd ===")
+OUT = "/opt/elsewhere"          # вне cwd и не временный каталог
+for label, command in [
+        ("chmod -R вне cwd",  "chmod -R 000 " + OUT),
+        ("chown -R вне cwd",  "chown -R nobody " + OUT)]:
+    d = bash(command)
+    check("G5 блок: {}".format(label), blocked(d), d)
+for label, command in [
+        ("chmod -R в cwd",    "chmod -R 755 build"),
+        ("chmod файла",       "chmod 644 src/app.py")]:
+    d = bash(command)
+    check("G5 не блок (в cwd): {}".format(label), not blocked(d), d)
 
 shutil.rmtree(TMP, ignore_errors=True)
 print("\nSUMMARY:", "ALL PASSED" if not FAILS else "FAILED({}) {}".format(len(FAILS), FAILS))

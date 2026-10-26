@@ -170,7 +170,7 @@ check("исполнение стороннего кода заблокирова
 
 print("=== F: удаление и перезапись вне рабочего каталога ===")
 DEL = ["unlink /etc/hosts", "truncate -s0 /var/x", "echo x > /etc/passwd",
-       "rm .git/index", "mv project-file /etc/y", "rm " + os.path.join(TMP, "other")]
+       "rm .git/index", "mv project-file /etc/y", "rm /opt/p2-other"]
 missed = [c for c in DEL if not blocked(bash(c))]
 check("удаление/перезапись вне cwd заблокировано", not missed, missed)
 OK = ["rm build/tmp.o", "echo x > out.txt", "mv a.txt b.txt", "truncate -s0 log.txt"]

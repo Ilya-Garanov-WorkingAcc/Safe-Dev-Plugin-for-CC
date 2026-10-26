@@ -277,6 +277,14 @@ def match_command(cmd, rule, ctx=None):
         if not any(any_glob(tg, t) for t in targets):
             return False
 
+    tgn = m.get("target_glob_not")
+    if tgn:
+        # Исключения из target_glob: служебные файлы, удаление которых безвредно
+        # (.git/index.lock, *.sample) — FP-8.
+        targets = list(cmd.operands) + list(ctx.get("expanded_operands") or ())
+        if any(any_glob(tgn, t) for t in targets):
+            return False
+
     wtg = m.get("write_target_glob")
     if wtg:
         # Как target_glob, но только по операндам, в которые идёт ЗАПИСЬ:

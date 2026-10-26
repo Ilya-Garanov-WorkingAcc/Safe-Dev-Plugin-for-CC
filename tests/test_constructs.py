@@ -209,9 +209,10 @@ for label, command, cwd in [
     check("уборка: {} — тихо".format(label),
           not blocked(decision(command, cwd=cwd)), decision(command, cwd=cwd))
 # но удаление вне рабочего каталога без cd остаётся под контролем
+# (не во временном каталоге: /tmp с 26.10.2026 считается безопасным — FP-7)
 check("rm -rf абсолютного пути вне cwd (без cd) → блок",
-      blocked(decision("rm -rf {}/build".format(other), cwd=WORKDIR)),
-      decision("rm -rf {}/build".format(other), cwd=WORKDIR))
+      blocked(decision("rm -rf /opt/elsewhere/build", cwd=WORKDIR)),
+      decision("rm -rf /opt/elsewhere/build", cwd=WORKDIR))
 
 print("=== G: рабочий каталог — дом или корень ===")
 home = os.environ["HOME"]

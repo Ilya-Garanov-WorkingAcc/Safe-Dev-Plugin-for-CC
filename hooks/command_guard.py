@@ -87,6 +87,12 @@ def build_context(cmd, cwd):
                 if not cmdparse.is_mktemp_path(op)]
     truncated = len(cmd.operands) > MAX_EXPANDED_OPERANDS
     expanded = [cmdparse.expand_operand(_target_dir(op), base) for op in operands]
+
+    def _temp(op, exp):
+        # Путь внутри временного каталога (/tmp, /var/tmp, mktemp): работа там
+        # не считается разрушением ВНЕ cwd (FP-7). Проверку на корень/дом это НЕ
+        # отменяет — `rm ~` ловится, даже если HOME оказался под /tmp.
+        return cmdparse.is_temp_path(op) or cmdparse.is_temp_path(exp)
     # Только цели записи-редиректа: `echo x 2>&1` не пишет в файл «1» (FP-3).
     expanded_redirects = [cmdparse.expand_operand(r, base)
                           for r in cmd.write_redirects[:MAX_EXPANDED_OPERANDS]]
@@ -113,7 +119,7 @@ def build_context(cmd, cwd):
         "git_subcommand": git_subcommand,
         "git_text": git_text,
         "has_operand_outside_cwd": truncated or any(
-            _outside(exp, base) for _, exp in pairs),
+            _outside(exp, base) and not _temp(raw, exp) for raw, exp in pairs),
         "has_root_target": any(_is_root_target(raw, exp, base) for raw, exp in pairs),
         "exempt_targets": _exempt_targets(pairs, base, truncated),
         "operand_dynamic": not cwd_known and any(
@@ -122,7 +128,8 @@ def build_context(cmd, cwd):
         "branch_protected": _branch_protected(cmd, cwd),
         "dest": dest or "",
         "dest_root": bool(dest) and _is_root_target(dest, dest_expanded, base),
-        "dest_outside_cwd": bool(dest) and _outside(dest_expanded, base),
+        "dest_outside_cwd": bool(dest) and _outside(dest_expanded, base)
+        and not _temp(dest, dest_expanded),
         "dest_dynamic": dest is not None and (dest == "" or not cwd_known or
                                               bool(DYNAMIC_DEST_RE.search(dest))),
     }

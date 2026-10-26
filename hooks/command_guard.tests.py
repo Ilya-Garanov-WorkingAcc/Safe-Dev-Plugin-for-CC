@@ -369,14 +369,14 @@ check("повторный ask не гасит эскалацию неразоб�
       blocked(run_sid("git branch -D feature/x; $X")))
 
 for label, command in [
-        ("второй операнд вне исключения", "rm -rf /tmp/a/node_modules/x /tmp/zz-victim"),
-        ("выход через ..",                "rm -rf /tmp/node_modules/../zz-victim"),
-        ("переменная в операнде",         "rm -rf /tmp/a/node_modules/$X")]:
+        ("второй операнд вне исключения", "rm -rf /opt/a/node_modules/x /opt/zz-victim"),
+        ("выход через ..",                "rm -rf /opt/node_modules/../zz-victim"),
+        ("переменная в операнде",         "rm -rf /opt/a/node_modules/$X")]:
     check("исключение node_modules: {} → блок (L2)".format(label),
           blocked(run(command)), str(decision(run(command))))
 check("исключение node_modules по-прежнему действует",
-      not blocked(run("rm -rf /tmp/a/node_modules/x /tmp/b/node_modules/y")),
-      str(decision(run("rm -rf /tmp/a/node_modules/x /tmp/b/node_modules/y"))))
+      not blocked(run("rm -rf /opt/a/node_modules/x /opt/b/node_modules/y")),
+      str(decision(run("rm -rf /opt/a/node_modules/x /opt/b/node_modules/y"))))
 
 for label, command in [
         ("прямой вызов",   "secure-dev trust . --yes"),

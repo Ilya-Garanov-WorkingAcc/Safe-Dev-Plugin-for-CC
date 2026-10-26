@@ -437,7 +437,7 @@ SYNC_ASK = [
     ("пустая переменная",      "rsync -a --delete out/ \"$HOME/$EMPTY/\""),
     ("переменная назначения",  "rsync -a --delete \"$SRC/\" \"$DST/\""),
     ("подстановка",            "rsync -a --delete out/ $(cat dest)/"),
-    ("вне cwd",                "rsync -a --delete out/ /tmp/deploy/"),
+    ("вне cwd",                "rsync -a --delete out/ /srv/deploy/"),
     ("find -delete от дома",   "find ~ -name '*.tmp' -delete"),
     ("find -delete от корня",  "find / -type f -name core -delete"),
     ("find -delete вне cwd",   "find /var/www -name '*.log' -delete"),

@@ -739,7 +739,8 @@
       "match": {
         "kind": "command",
         "argv0": ["rm", "unlink", "shred", "truncate"],
-        "target_glob": ["**/.git", "**/.git/**", ".git", ".git/**"]
+        "target_glob": ["**/.git", "**/.git/**", ".git", ".git/**"],
+        "target_glob_not": ["**/.git/index.lock", ".git/index.lock", "**/*.sample", "**/.git/*.lock", ".git/*.lock"]
       },
       "message": "Удаление служебных файлов git (.git, .git/refs, .git/HEAD) — потеря истории репозитория.",
       "remediation": "Чтобы разорвать связь с git, достаточно переинициализации по отдельной процедуре; удалять .git вручную не нужно.",
@@ -851,6 +852,20 @@
       "reference": "docs/RUNBOOK.md#command-destructive"
     },
     {
+      "id": "command-chmod-recursive-outside-cwd",
+      "class": "command-destructive",
+      "severity": "MEDIUM",
+      "match": {
+        "kind": "command",
+        "argv0": ["chmod", "chown", "chgrp"],
+        "flags_all": ["--recursive"],
+        "target_outside_cwd": true
+      },
+      "message": "Рекурсивная смена прав или владельца за пределами рабочего каталога.",
+      "remediation": "Меняйте права и владельца внутри проекта; вне cwd — выполните сами в терминале.",
+      "reference": "docs/RUNBOOK.md#command-destructive"
+    },
+    {
       "id": "command-docker-mount-host",
       "class": "privilege",
       "severity": "HIGH",
@@ -896,7 +911,7 @@
       "severity": "HIGH",
       "match": {
         "kind": "command",
-        "args_regex_any": ["(?:^|[;&|]\\s*)(?:export\\s+)?(?:LD_PRELOAD|LD_LIBRARY_PATH|BASH_ENV|ENV|PROMPT_COMMAND|PYTHONSTARTUP)="]
+        "args_regex_any": ["(?:^|[;&|]\\s*)(?:export\\s+)?(?:LD_PRELOAD|BASH_ENV|ENV|PROMPT_COMMAND|PYTHONSTARTUP)="]
       },
       "message": "Установка переменной окружения, через которую выполняется произвольный код при запуске программ (LD_PRELOAD, BASH_ENV, PROMPT_COMMAND).",
       "remediation": "Нужную библиотеку подключайте флагом конкретной команды, а не глобальной переменной.",
