@@ -22,7 +22,19 @@ PLACEHOLDER = "[REDACTED:{}]"
 _KEYWORD_VALUE_RE = re.compile(
     r"^(?:string|str|int|integer|bool|boolean|true|false|null|none|nil|required|"
     r"optional|number|object|array|any|void|undefined|empty|bearer|basic|digest|"
-    r"token|secret|password|changeme|placeholder|example|redacted|x{3,}|"
+    r"token|secret|password|changeme|changeit|placeholder|example|sample|dummy|"
+    r"redacted|foobar|x{3,}|"
+    # Значения, которые заведомо не являются учётными данными и портили код,
+    # читаемый моделью (FP-1, 26.10.2026). Каждый пункт безопасен: настоящий
+    # ключ/токен/пароль так не выглядит.
+    r"[+-]?\d[\d_]*(?:\.\d+)?|"                      # число: MAX_TOKENS=1000000
+    r"[/~][^\s]*|\.{1,2}/[^\s]*|"                    # путь: PWD=/home/..., ./x
+    r"[a-z][a-z0-9+.\-]*://[^@\s]*|"                 # URL без учётных данных
+    r"your[\w-]*|" +
+    # ссылка на код: self.x, request.form, os.getenv, config.X
+    r"(?:self|cls|this|req|request|res|response|os|sys|io|process|config|"
+    r"settings|ctx|context|window|document|globals|locals|params|conf|app)"
+    r"\.[\w.]*|"
     r"os\.environ[\w.()\[\]\"']*|process\.env[\w.()\[\]\"']*|"
     r"<[^>]*>|\$\{?[\w.]+\}?|env\.[\w.]+|\[redacted:[^\]]*\])$", re.I)
 

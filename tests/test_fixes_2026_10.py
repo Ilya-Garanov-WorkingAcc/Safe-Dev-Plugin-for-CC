@@ -316,6 +316,41 @@ for label, command in [
         ("scp remote",      "scp secret.txt user@host:/tmp/")]:
     check("FP-6 egress (контроль): {}".format(label), tainted_egress(command), command)
 
+print("=== FP-1: secret_redactor не портит обычный код ===")
+from lib import redact as _redact                               # noqa: E402
+
+
+def redacted(text):
+    out, findings = _redact.redact(text)
+    return bool(findings) or out != text
+
+
+# НЕ секреты — не должны редактироваться.
+NONSECRET = [
+    ("MAX_TOKENS число",   "MAX_TOKENS = 1000000"),
+    ("TOKEN_URL",          'TOKEN_URL = "https://api.example.com/v1/data"'),
+    ("password из формы",  'password = request.form["password"]'),
+    ("token = self.X",     "token = self.tokenizer"),
+    ("GIT_AUTHOR_EMAIL",   "GIT_AUTHOR_EMAIL=someone@example.com"),
+    ("PWD путь",           "PWD=/home/user/project/src"),
+    ("CREDENTIAL_FILE путь", "CREDENTIAL_FILE=/etc/app/credentials.json"),
+    ("плейсхолдер your-",  "SECRET_KEY=your-secret-key-here"),
+    ("api_key тип",        "api_key: string"),
+]
+for label, text in NONSECRET:
+    check("FP-1 не редактируется: {}".format(label), not redacted(text), text)
+
+print("=== FP-1 (контроль): настоящие секреты по-прежнему редактируются ===")
+SECRET = [
+    ("API_KEY в кавычках", 'API_KEY = "sk-live-abc123def456ghi789xyz0"'),
+    ("SECRET_TOKEN",       "export SECRET_TOKEN=ghp_abcdefghijklmnop123456"),
+    ("слабый пароль",      'PASSWORD="hunter2two"'),
+    ("URL с кредами",      'DB_PASSWORD="postgres://user:realpass@host/db"'),
+    ("AWS ключ",           "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIabcK7MDENGbPxRfiCYEX"),
+]
+for label, text in SECRET:
+    check("FP-1 редактируется (секрет): {}".format(label), redacted(text), text)
+
 shutil.rmtree(TMP, ignore_errors=True)
 print("\nSUMMARY:", "ALL PASSED" if not FAILS else "FAILED({}) {}".format(len(FAILS), FAILS))
 sys.exit(1 if FAILS else 0)
