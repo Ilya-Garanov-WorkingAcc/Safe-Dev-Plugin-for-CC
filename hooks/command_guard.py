@@ -445,7 +445,15 @@ def decide(matches, session_id, agent_id):
 # такая команда с внешним адресом уходит в ask.
 _EGRESS_ARGV0 = {"curl", "wget", "nc", "ncat", "socat", "scp", "sftp", "ssh",
                  "rsync", "ftp", "telnet", "http", "httpie"}
-_EXTERNAL_RE = re.compile(r"https?://|ftp://|@[\w.-]+:|[\w.-]+\.[a-z]{2,}")
+# Инструменты, аргумент которых — URL/хост (а не локальный файл).
+_URL_ARGV0 = {"curl", "wget", "http", "httpie"}
+# URL/хост у curl/wget: схема или домен с TLD.
+_URL_RE = re.compile(r"://|(?:^|\s)[\w.-]+\.[a-z]{2,}(?:[/:?]|$)")
+# Удалённая цель у scp/rsync/ssh/nc: схема, `user@host:` или `host:path`.
+# Локальный файл (`notes.md`, `backup/`) сюда не попадает (FP-6): без этого
+# любая локальная rsync/scp в tainted-сессии ложно считалась egress.
+_REMOTE_RE = re.compile(r"://|@[\w.-]+:|(?:^|\s)[\w][\w.-]*:(?:/|~|\w)")
+_LOCALHOST_RE = re.compile(r"localhost|127\.0\.0\.1|::1")
 
 
 def _tainted_egress(data, command):
@@ -462,7 +470,10 @@ def _tainted_egress(data, command):
     for cmd in cmds:
         if cmd.argv0 in _EGRESS_ARGV0:
             joined = " ".join(cmd.args)
-            if _EXTERNAL_RE.search(joined) and "localhost" not in joined:
+            if _LOCALHOST_RE.search(joined):
+                continue
+            rx = _URL_RE if cmd.argv0 in _URL_ARGV0 else _REMOTE_RE
+            if rx.search(joined):
                 return True
     return False
 

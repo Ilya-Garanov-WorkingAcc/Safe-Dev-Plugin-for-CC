@@ -28,10 +28,36 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib import audit, config, hookio, policy                    # noqa: E402
+from lib import audit, cmdparse, config, hookio, policy          # noqa: E402
 from lib import injection as _injection                          # noqa: E402
 
 HOOK = "injection_scanner"
+
+# Инструменты, вывод которых приходит ИЗВНЕ: их содержимое может нести
+# инъекцию, которой стоит пометить сессию. Локальное чтение собственного кода
+# и документации (Read/Grep/Glob и Bash cat/head/…) инъекцией не является и
+# сессию не метит — иначе чтение примеров атак в исходниках плагина поднимало
+# taint и переводило последующие локальные команды в ask (FP-6, 26.10.2026).
+# Сам разбор (additionalContext) выполняется в любом случае — видимость важна.
+_NETWORK_ARGV0 = {"curl", "wget", "nc", "ncat", "socat", "scp", "sftp", "ssh",
+                  "rsync", "ftp", "telnet", "http", "httpie", "aria2c", "git",
+                  "pip", "npm", "gh", "glab", "kubectl", "aws", "gcloud"}
+
+
+def _external_source(tool, tool_input):
+    """Вывод пришёл из внешнего источника (сеть), а не из локального файла."""
+    if tool in ("WebFetch", "WebSearch") or tool.startswith("mcp__"):
+        return True
+    if tool == "Bash":
+        command = tool_input.get("command")
+        if not isinstance(command, str):
+            return False
+        try:
+            cmds, _ = cmdparse.parse(command)
+        except Exception:
+            return True                       # не разобрали — осторожно: метим
+        return any(c.argv0 in _NETWORK_ARGV0 for c in cmds)
+    return False
 
 # Публичный API, на который опирается тест-батарея. Реэкспорт, а не копия:
 # единственная реализация живёт в lib/injection.py и используется ещё и
@@ -107,7 +133,7 @@ def main():
     # Высокая уверенность: помечаем сессию. Дальше command_guard проводит
     # сетевые команды и запись в чувствительные пути через ask — на случай,
     # если инъекция уже убедила модель что-то отправить (аудит 03.10.2026, I2).
-    if confidence == "high":
+    if confidence == "high" and _external_source(tool, tool_input):
         try:
             policy.state_set(data.get("session_id"), "injection_tainted",
                              audit.now_iso())
