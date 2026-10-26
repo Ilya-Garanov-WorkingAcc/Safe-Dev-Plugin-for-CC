@@ -269,7 +269,8 @@ def match_command(cmd, rule, ctx=None):
     if rg:
         # `echo evil >> ~/.bashrc` — цель не операнд, а перенаправление;
         # без этой ветки персистентный RCE через shell-конфиг не виден.
-        targets = list(cmd.redirects) + list(ctx.get("expanded_redirects") or ())
+        # Только цели записи: `2>&1`/`< f` сюда не входят (FP-3).
+        targets = list(cmd.write_redirects) + list(ctx.get("expanded_redirects") or ())
         if not any(any_glob(rg, t) for t in targets):
             return False
 

@@ -86,8 +86,9 @@ def build_context(cmd, cwd):
                 if not cmdparse.is_mktemp_path(op)]
     truncated = len(cmd.operands) > MAX_EXPANDED_OPERANDS
     expanded = [cmdparse.expand_operand(_target_dir(op), base) for op in operands]
+    # Только цели записи-редиректа: `echo x 2>&1` не пишет в файл «1» (FP-3).
     expanded_redirects = [cmdparse.expand_operand(r, base)
-                          for r in cmd.redirects[:MAX_EXPANDED_OPERANDS]]
+                          for r in cmd.write_redirects[:MAX_EXPANDED_OPERANDS]]
     positional = [op for op in cmd.operands if not op.startswith("-")]
     # Назначение — последний позиционный операнд (rsync, cp, mv, tar -C — нет,
     # у tar это значение флага, см. правило по args_regex_any).
@@ -346,7 +347,8 @@ def collect_matches(command, cmds, cwd):
                     target = ctx["dest"]
                 else:
                     target = (cmd.operands[0] if cmd.operands
-                              else (cmd.redirects[0] if cmd.redirects else cmd.argv0))
+                              else (cmd.write_redirects[0] if cmd.write_redirects
+                                    else cmd.argv0))
                 matches.append((rule, cmd, target, ctx.get("exempt_targets")))
                 break            # одного срабатывания правила достаточно
     return matches

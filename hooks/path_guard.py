@@ -104,7 +104,11 @@ def _match_bash(command, cwd):
         for cmd in cmds:
             base = cmdparse.effective_cwd(cmd, cwd) or cwd
             if readers and cmd.argv0 in readers:
-                candidates = list(cmd.operands) + _at_values(cmd) + list(cmd.redirects)
+                # Чтение через stdin-редирект (`base64 < id_rsa`) — это чтение
+                # файла-цели; дублирование дескрипторов (`2>&1`) файлом не
+                # является и в stdin_file не попадает (FP-3).
+                stdin = [cmd.stdin_file] if cmd.stdin_file else []
+                candidates = list(cmd.operands) + _at_values(cmd) + stdin
                 hit = _bash_hit(rule, candidates, base, "read")
                 if hit:
                     return rule, hit
@@ -113,7 +117,8 @@ def _match_bash(command, cwd):
                 if hit:
                     return rule, hit
             if rule["match"].get("write_tools"):
-                hit = _bash_hit(rule, cmd.redirects, base, "write")
+                # Только цели записи-редиректа (`> f`, `>> f`), не `2>&1`/`< f`.
+                hit = _bash_hit(rule, cmd.write_redirects, base, "write")
                 if hit:
                     return rule, hit
     return None, None

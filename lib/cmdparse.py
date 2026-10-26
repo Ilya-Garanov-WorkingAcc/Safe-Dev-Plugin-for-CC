@@ -248,6 +248,11 @@ class Cmd:
     upstream: tuple = ()
     downstream: tuple = ()
     redirects: tuple = ()
+    # Подмножество redirects: цели-файлы, в которые идёт ЗАПИСЬ (`>`, `>>`,
+    # `>|`, `&>`, `&>>`, `<>`). Дублирование и закрытие дескрипторов (`2>&1`,
+    # `>&2`, `3>&-`), чтение (`<`, `0<`) и here-string (`<<<`) сюда не входят:
+    # иначе `echo x 2>&1` принималось за запись в файл «1» (FP-3, 26.10.2026).
+    write_redirects: tuple = ()
     assignments: tuple = ()
     var_argv0: bool = False
     # Имя команды как написано (`./deploy/e2e-test.sh`, `/usr/bin/rm`): argv0
@@ -891,6 +896,7 @@ def _build(words, depth, origin, position, pipeline_index, state):
             cmd = Cmd(argv0=":", raw=": > " + " ".join(red["redirects"]),
                       depth=depth, origin=origin, pipeline=pipeline_index,
                       position=position, redirects=tuple(red["redirects"]),
+                      write_redirects=tuple(red["write_redirects"]),
                       assignments=tuple(assignments), argv0_text=":",
                       stdout_file=red["stdout_file"] or "",
                       stdin_file=red["stdin_file"] or "", cwd=state.get("cd"))
@@ -934,6 +940,7 @@ def _build(words, depth, origin, position, pipeline_index, state):
     cmd = Cmd(argv0=argv0, args=args, flags=flags, operands=operands,
               depth=depth, origin=origin, raw=raw, pipeline=pipeline_index,
               position=position, redirects=tuple(red["redirects"]),
+              write_redirects=tuple(red["write_redirects"]),
               assignments=tuple(assignments), var_argv0=var_argv0,
               argv0_text=_render(head).strip().lstrip("\\"),
               here_strings=tuple(red["here_strings"]),
@@ -979,6 +986,7 @@ def _strip_redirects(words):
     вычисляется или это /dev/stdout и подобное).
     """
     out, redirects, heredocs, here_strings, subs = [], [], [], [], []
+    write_redirects = []
     stdout_targets, stdout_static, stdin_file = [], True, None
     i = 0
     while i < len(words):
@@ -997,19 +1005,35 @@ def _strip_redirects(words):
             i += 1                           # оператор без цели
             continue
         i += 2
-        redirects.append(_render(target))
+        rendered = _render(target)
+        redirects.append(rendered)
         subs.extend(target.subs)
         if op.endswith("<<<"):
             here_strings.append(target.text)
         elif op in ("<", "0<"):
-            stdin_file = _render(target)
+            stdin_file = rendered
+        elif _is_write_redirect(op):
+            write_redirects.append(rendered)
         stdout_static &= _note_stdout(op, target.text, target, stdout_targets)
     stdout_file = None
     if stdout_static and len(stdout_targets) == 1:
         stdout_file = stdout_targets[0]
     return {"words": out, "redirects": redirects, "stdout_file": stdout_file,
             "heredocs": heredocs, "here_strings": here_strings,
-            "stdin_file": stdin_file, "subs": subs}
+            "stdin_file": stdin_file, "subs": subs,
+            "write_redirects": write_redirects}
+
+
+def _is_write_redirect(op):
+    """Оператор пишет в файл-цель?
+
+    Запись: `>`, `>>`, `>|`, `&>`, `&>>`, `N>`, `<>` (открывает на запись).
+    Не запись: дублирование/закрытие дескриптора (оканчивается на `&`:
+    `>&`, `<&`, `N>&`, `N>&-`), чтение (`<`, `N<`), here-string (`<<<`).
+    """
+    if op.endswith("&"):            # >&, <&, 2>&, 3>& (с целью-числом или `-`)
+        return False
+    return ">" in op
 
 
 def _note_stdout(op, target, word, targets):
