@@ -57,6 +57,7 @@ DYNAMIC_DEST_RE = re.compile(r"\$\(\)|`|\$\{?[A-Za-z_]")
 # Все они означают одно: статически неизвестно, что будет выполнено.
 ESCALATING_WARNINGS = {
     "argv0_is_variable", "argv0_from_substitution", "interpreter_exec",
+    "interpreter_fs",
     "max_depth_exceeded", "too_many_commands", "recursion_limit",
     "source_unresolved", "shell_c_unresolved", "heredoc_unresolved",
     "command_too_long", "argv0_dynamic", "ifs_split", "shell_stdin_unresolved",
@@ -443,6 +444,12 @@ def _ask_unparsed(data, command, why):
         hookio.ask("PreToolUse",
                    "secure-dev: команда слишком длинная для надёжной проверки. "
                    "Подтвердите, если она ожидаема, либо разбейте её на части.")
+    if why == "interpreter_fs":
+        hookio.ask("PreToolUse",
+                   "secure-dev: код интерпретатора (python/perl/node/ruby -c/-e) "
+                   "удаляет или очищает файлы напрямую, минуя rm. Путь-цель из "
+                   "чужого языка статически не проверить. Подтвердите, если это "
+                   "ожидаемо, либо выполните удаление через rm/Bash.")
     hookio.ask("PreToolUse",
                "secure-dev: команда собирается динамически, статически "
                "проверить её невозможно. Подтвердите, если она ожидаема.")

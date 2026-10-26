@@ -144,6 +144,40 @@ for label, command in [
 # Чтение настоящего секрета читателем по-прежнему блок.
 check("FP-2 cat id_rsa блок", blocked(bash("cat " + IDRSA)), bash("cat " + IDRSA))
 
+print("=== G1: разрушение ФС кодом интерпретатора (-c/-e, heredoc) ===")
+TGT = os.path.join(WORK, "data")
+DESTRUCTIVE = [
+    ("py shutil.rmtree", 'python3 -c \'import shutil; shutil.rmtree("%s")\'' % TGT),
+    ("py os.remove",     'python3 -c \'import os; os.remove("%s")\'' % TGT),
+    ("py os.unlink",     'python3 -c \'import os; os.unlink("%s")\'' % TGT),
+    ("py pathlib.unlink", 'python3 -c \'import pathlib; pathlib.Path("%s").unlink()\'' % TGT),
+    ("py os.remove"+"dirs", 'python3 -c \'import os; os.remove'+'dirs("%s")\'' % TGT),
+    ("perl unlink",      'perl -e \'unlink "%s"\'' % TGT),
+    ("perl remove_tree", 'perl -e \'use File::Path; remove_tree("%s")\'' % TGT),
+    ("node rmSync",      'node -e \'require("fs").rmSync("%s",{recursive:true})\'' % TGT),
+    ("node unlinkSync",  'node -e \'require("fs").unlinkSync("%s")\'' % TGT),
+    ("ruby rm_rf",       'ruby -e \'require "fileutils"; FileUtils.rm_rf("%s")\'' % TGT),
+    ("ruby File.delete", 'ruby -e \'File.delete("%s")\'' % TGT),
+    ("py heredoc",       'python3 <<EOF\nimport shutil\nshutil.rmtree("%s")\nEOF' % TGT),
+]
+for label, command in DESTRUCTIVE:
+    d = bash(command)
+    check("G1 блок: {}".format(label), blocked(d), d)
+
+print("=== G1 (контроль): безвредный код интерпретатора не блокируется ===")
+BENIGN = [
+    ("py print",     'python3 -c \'print(1+1)\''),
+    ("py json",      'python3 -c \'import json; print(json.dumps({"a":1}))\''),
+    ("node log",     'node -e \'console.log(42)\''),
+    ("py open read", 'python3 -c \'print(open("%s").read())\'' % os.path.join(WORK, "f.txt")),
+]
+for label, command in BENIGN:
+    d = bash(command)
+    check("G1 не блок (безвредно): {}".format(label), not blocked(d), d)
+# Тело heredoc-данных (пример кода в документе) не считается исполнением.
+doc = 'cat > %s <<EOF\nimport shutil; shutil.rmtree("/")\nEOF' % os.path.join(WORK, "readme.md")
+check("G1 heredoc-данные не блок", not blocked(bash(doc)), bash(doc))
+
 shutil.rmtree(TMP, ignore_errors=True)
 print("\nSUMMARY:", "ALL PASSED" if not FAILS else "FAILED({}) {}".format(len(FAILS), FAILS))
 sys.exit(1 if FAILS else 0)

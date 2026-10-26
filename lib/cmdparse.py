@@ -192,6 +192,27 @@ INTERPRETER_EXEC_RE = re.compile(
     re.IGNORECASE)
 STRING_LITERAL_RE = re.compile(r"'([^'\n]{2,400})'|\"([^\"\n]{2,400})\"")
 
+# Разрушение файловой системы нативными вызовами интерпретатора — удаление,
+# очистка, переименование (перенос с перезаписью). Полный обход блока
+# command-destructive одной строкой `python3 -c …` был классом инцидента
+# 18.09.2026, но исполнялся на Python (G1, 26.10.2026). Имена методов в этих
+# языках регистрозависимы, но смешанный поиск безопаснее (fail-closed → ask).
+INTERPRETER_FS_RE = re.compile(
+    # Python: shutil, os, pathlib
+    r"shutil\.rmtree|shutil\.move|"
+    r"os\.remove\b|os\.removedirs|os\.unlink|os\.rmdir|os\.truncate|"
+    r"os\.rename|os\.replace|"
+    # Perl: File::Path, встроенные unlink/rmdir
+    r"remove_tree|rmtree|"
+    # Node: fs.*
+    r"fs\.rm\b|fs\.rmSync|fs\.unlink|fs\.rmdir|fs\.truncate|rmSync\s*\(|"
+    r"unlinkSync|rmdirSync|"
+    # Ruby: FileUtils, File, Dir
+    r"FileUtils\.(?:rm|remove)|File\.(?:delete|unlink)|remove_entry|Dir\.rmdir|"
+    # pathlib Path(...).unlink()/.rmdir(); perl/ruby unlink/rmdir/truncate
+    r"\.unlink\s*\(|\.rmdir\s*\(|"
+    r"\bunlink\b|\brmdir\s*\(|\btruncate\s*\(")
+
 # Heredoc: кому достаётся тело (см. _classify_heredoc).
 HEREDOC_DATA = "data"          # текст, уходящий в файл: командами не является
 HEREDOC_CODE = "code"          # читает шелл либо получатель не доказуем
@@ -1103,6 +1124,10 @@ def _interpreter_code(code, depth, state):
                        raw=code[:200]))
         for literal in _literals(code):
             out.extend(_parse_text(literal, depth + 1, INTERPRETER, state))
+    if INTERPRETER_FS_RE.search(code):
+        # Разрушение ФС нативным вызовом: статически путь-цель из чужого языка
+        # надёжно не извлечь, поэтому решение отдаётся человеку (fail-closed).
+        state["warnings"].append("interpreter_fs")
     return out
 
 
