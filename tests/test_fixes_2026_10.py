@@ -214,6 +214,49 @@ for label, command in [
     d = bash(command)
     check("G3 не блок: {}".format(label), not blocked(d), d)
 
+print("=== FP-4: git-правила матчат по подкоманде, не по тексту сообщений ===")
+GITFP = [
+    ("remote prune",   "git remote prune origin"),
+    ("worktree prune", "git worktree prune"),
+    ("notes prune",    "git notes prune"),
+    ("log -S prune",   "git log -S prune"),
+    ("log --grep",     "git log --grep=reset"),
+    ("сообщение с триггерами",
+                       "git commit -m 'prune old stash drop, tag -d, branch -f'"),
+]
+for label, command in GITFP:
+    d = bash(command)
+    check("FP-4 не блок: {}".format(label), not blocked(d), d)
+
+print("=== FP-4 (контроль): реальные разрушительные git по-прежнему блок ===")
+GITBLOCK = [
+    ("git prune",        "git prune"),
+    ("gc --prune",       "git gc --prune=now"),
+    ("reflog expire",    "git reflog expire --all"),
+    ("stash drop",       "git stash drop"),
+    ("branch -f protected", "git branch -f main HEAD~3"),
+    ("tag -d",           "git tag -d v1"),
+]
+for label, command in GITBLOCK:
+    d = bash(command)
+    check("FP-4 блок: {}".format(label), blocked(d), d)
+
+print("=== FP-5: безопасные значения git -c (pager/editor) не блок ===")
+for label, command in [
+        ("core.pager=cat",     "git -c core.pager=cat log"),
+        ("core.editor=true",   "git -c core.editor=true rebase --continue"),
+        ("core.pager=less",    "git -c core.pager=less diff")]:
+    d = bash(command)
+    check("FP-5 не блок: {}".format(label), not blocked(d), d)
+
+print("=== FP-5 (контроль): опасные git -c по-прежнему блок ===")
+for label, command in [
+        ("core.fsmonitor",  "git -c core.fsmonitor=cmd status"),
+        ("core.pager=exec", "git -c core.pager=xyzrun log"),
+        ("alias bang",      "git -c alias.x=!xyzrun x")]:
+    d = bash(command)
+    check("FP-5 блок: {}".format(label), blocked(d), d)
+
 shutil.rmtree(TMP, ignore_errors=True)
 print("\nSUMMARY:", "ALL PASSED" if not FAILS else "FAILED({}) {}".format(len(FAILS), FAILS))
 sys.exit(1 if FAILS else 0)

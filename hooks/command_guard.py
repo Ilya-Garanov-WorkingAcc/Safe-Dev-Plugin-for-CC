@@ -95,6 +95,7 @@ def build_context(cmd, cwd):
     write_targets = cmdparse.write_targets(cmd)[:MAX_EXPANDED_OPERANDS]
     expanded_write_targets = [cmdparse.expand_operand(_target_dir(t), base)
                               for t in write_targets]
+    git_subcommand, git_text = _git_semantic(cmd)
     positional = [op for op in cmd.operands if not op.startswith("-")]
     # Назначение — последний позиционный операнд (rsync, cp, mv, tar -C — нет,
     # у tar это значение флага, см. правило по args_regex_any).
@@ -109,6 +110,8 @@ def build_context(cmd, cwd):
         "expanded_redirects": expanded_redirects,
         "write_targets": list(write_targets),
         "expanded_write_targets": expanded_write_targets,
+        "git_subcommand": git_subcommand,
+        "git_text": git_text,
         "has_operand_outside_cwd": truncated or any(
             _outside(exp, base) for _, exp in pairs),
         "has_root_target": any(_is_root_target(raw, exp, base) for raw, exp in pairs),
@@ -304,6 +307,50 @@ def _is_root_target(raw, expanded, cwd):
     except OSError:
         return False
     return here != expanded and here.startswith(expanded.rstrip("/") + os.sep)
+
+
+# Флаги git, значение которых — свободный текст (сообщение, шаблон поиска):
+# их значения не должны попадать в семантический матчинг, иначе `git commit
+# -m "stash drop"` и `git log -S prune` ловятся как разрушительные (FP-4).
+_GIT_DROP_VALUE_FLAGS = frozenset({
+    "-m", "--message", "-F", "--file", "--grep", "--author", "--committer",
+    "-S", "-G", "--pretty", "--format", "--date", "--fixup", "--squash"})
+# Глобальные опции git со значением — их значение не подкоманда.
+_GIT_GLOBAL_VALUE_FLAGS = frozenset({
+    "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path",
+    "--super-prefix"})
+
+
+def _git_semantic(cmd):
+    """(подкоманда git, очищенный текст аргументов).
+
+    Из текста выброшены значения флагов сообщения/поиска: по нему git-правила
+    матчат подкоманду и её опции, а не содержимое коммит-сообщения.
+    """
+    if cmd.argv0 != "git":
+        return None, ""
+    args = list(cmd.args)
+    out, sub, i = [], None, 0
+    while i < len(args):
+        a = args[i]
+        head = a.split("=", 1)[0]
+        if a in _GIT_DROP_VALUE_FLAGS:
+            i += 2                                   # флаг + отдельное значение
+            continue
+        if "=" in a and head in _GIT_DROP_VALUE_FLAGS:
+            i += 1                                   # --grep=foo
+            continue
+        if (a.startswith("-") and not a.startswith("--") and len(a) > 2
+                and a[:2] in _GIT_DROP_VALUE_FLAGS):
+            i += 1                                   # -mMSG, -Sfoo (склеенно)
+            continue
+        out.append(a)
+        if sub is None and not a.startswith("-"):
+            prev = args[i - 1] if i > 0 else ""
+            if prev not in _GIT_GLOBAL_VALUE_FLAGS:
+                sub = a
+        i += 1
+    return sub, " ".join(out)
 
 
 def _branch_protected(cmd, cwd):

@@ -243,6 +243,18 @@ def match_command(cmd, rule, ctx=None):
         if not any(re.search(p, joined) for p in rx_any):
             return False
 
+    git_rx = m.get("git_regex_any")
+    if git_rx:
+        # Матчинг по очищенному тексту git (подкоманда + опции, без значений
+        # -m/--grep/-S): слова в коммит-сообщении не срабатывают (FP-4).
+        gt = ctx.get("git_text") or ""
+        if not any(re.search(p, gt) for p in git_rx):
+            return False
+
+    git_sub = m.get("git_subcommand_any")
+    if git_sub and (ctx.get("git_subcommand") or "") not in git_sub:
+        return False
+
     origins = m.get("origin")
     if origins and cmd.origin not in origins:
         return False

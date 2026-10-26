@@ -605,7 +605,7 @@
       "match": {
         "kind": "command",
         "argv0": ["git"],
-        "args_regex_any": ["(?:^| )reflog\\b.*\\bexpire\\b", "(?:^| )gc\\b.*--prune", "(?:^| )update-ref\\b.*(?:^| )-d\\b", "(?:^| )stash\\b.*(?:^| )(?:drop|clear)\\b", "(?:^| )branch\\b.*(?:^| )(?:-f|--force)\\b", "(?:^| )tag\\b.*(?:^| )(?:-d|--delete)\\b", "(?:^| )(?:prune)\\b"]
+        "git_regex_any": ["^reflog\\b.*\\bexpire\\b", "^gc\\b.*--prune", "^update-ref\\b.*(?:^| )-d\\b", "^stash\\b.*(?:^| )(?:drop|clear)\\b", "^branch\\b.*(?:^| )(?:-f|--force)\\b", "^tag\\b.*(?:^| )(?:-d|--delete)\\b", "^prune\\b"]
       },
       "message": "Стирание истории или ссылок git: reflog expire, gc --prune, update-ref -d, stash drop/clear, перемещение ветки силой.",
       "remediation": "Эти операции необратимо удаляют объекты. Если нужно освободить место или убрать ветку — согласуйте и выполните вне агента.",
@@ -618,7 +618,7 @@
       "match": {
         "kind": "command",
         "argv0": ["git"],
-        "args_regex_any": ["(?:^| )-c\\s+\\S*(?:core\\.(?:fsmonitor|hookspath|sshcommand|pager|editor)|alias\\.\\S+=\\s*!|\\S+\\.\\S*textconv)", "(?:^| )(?:--upload-pack|--receive-pack|--exec)=", "ext::", "(?:^| )config\\b.*(?:core\\.(?:fsmonitor|hookspath|sshcommand)|alias\\.\\S+\\s+!)"]
+        "args_regex_any": ["(?:^| )-c\\s+\\S*(?:core\\.(?:fsmonitor|hookspath|sshcommand)|alias\\.\\S+=\\s*!|\\S+\\.\\S*textconv)", "(?:^| )-c\\s+\\S*core\\.(?:pager|editor)=(?!(?:cat|less|more|true|false|head|tail|nl)(?:\\s|$))\\S", "(?:^| )(?:--upload-pack|--receive-pack|--exec)=", "ext::", "(?:^| )config\\b.*(?:core\\.(?:fsmonitor|hookspath|sshcommand)|alias\\.\\S+\\s+!)"]
       },
       "message": "Запуск git с ключами, исполняющими произвольную команду (core.fsmonitor, core.hooksPath, alias с !, --upload-pack, ext::).",
       "remediation": "Эти настройки задают команды, которые git выполнит сам. Нужное поведение настраивается в репозитории человеком.",
