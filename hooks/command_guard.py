@@ -481,31 +481,40 @@ _EGRESS_ARGV0 = {"curl", "wget", "nc", "ncat", "socat", "scp", "sftp", "ssh",
 _BARE_EXCLUDE = {"scp", "rsync"}
 # scp/rsync/sftp понимают форму `host:path` и `host::module`.
 _HOSTCOLON_TOOLS = {"scp", "rsync", "sftp"}
-# Типы адресов socat, у которых host — второе поле: `TCP:host:port`.
-_SOCAT_TYPES = {"TCP", "TCP4", "TCP6", "UDP", "UDP4", "UDP6", "OPENSSL",
-                "OPENSSL-CONNECT", "SOCKS4", "SOCKS4A", "SOCKS5", "PROXY",
-                "SCTP", "SCTP4", "SCTP6"}
-
-_SCHEME_RE = re.compile(r"^[a-z][\w+.-]*://(?:[^/@\s]*@)?(\[[^\]\s]+\]|[^/:\s]+)", re.I)
+# Схема ищется в ЛЮБОМ месте токена (`.search`): `--url=http://evil.com`,
+# `-ohttp://…` тоже содержат адрес (ревью 27.10.2026, подтверждающий проход).
+# Длина схемы ОГРАНИЧЕНА ({0,19}): без этого `.search` по длинному токену без
+# `://` давал катастрофический бэктрекинг (ReDoS, ~7s на 60 КБ).
+_SCHEME_RE = re.compile(
+    r"[a-z][a-z0-9+.\-]{0,19}://(?:[^/@\s]*@)?(\[[^\]\s]+\]|[^/:\s]+)", re.I)
 _USERHOST_RE = re.compile(r"^[^@/\s]+@(\[[^\]\s]+\]|[^:/\s]+)")
-_HOSTCOLON_RE = re.compile(r"^(\[[^\]\s]+\]|[A-Za-z0-9.\-]+)::?(?![\\/])")
+# `host:` / `host:/path` / `host::module` — удалённая цель scp/rsync/sftp.
+# Лукахед не отбрасываем: `host:/abs/path` — самая частая форма.
+_HOSTCOLON_RE = re.compile(r"^(\[[^\]\s]+\]|[A-Za-z0-9.\-]+)::?")
+# Голый домен/IP как ПРЕФИКС токена: за ним может идти `/path`, `:port`, `?query`.
 _BARE_DOMAIN_RE = re.compile(
-    r"^(?:(?:[\w-]+\.)+[a-z]{2,}\.?|\d{1,3}(?:\.\d{1,3}){3})$", re.I)
-_IPV6_RE = re.compile(r"^\[?(?:[0-9a-f]{0,4}:){2,}[0-9a-f]{0,4}\]?$", re.I)
+    r"^((?:[\w-]+\.)+[a-z]{2,}|\d{1,3}(?:\.\d{1,3}){3})(?:[:/?]|$)", re.I)
+_IPV6_RE = re.compile(r"^\[?(?:[0-9a-f]{0,4}:){2,}[0-9a-f]{0,4}\]?", re.I)
+# socat: тип-сеть перед host (TCP/UDP/SSL/OPENSSL/SOCKS/PROXY/SCTP/DCCP, в т. ч.
+# `*-CONNECT`, `*-SENDTO`): host — второе поле `TYPE:host:port`.
+_SOCAT_TYPE_RE = re.compile(r"^(?:TCP|UDP|SSL|OPENSSL|SOCKS|PROXY|SCTP|DCCP)", re.I)
+# Петлевой адрес — только ПОЛНЫЙ: `127.0.0.1.evil.com` и `127.evil.com` — НЕ
+# loopback (подделка через поддомен).
+_LOOPBACK4_RE = re.compile(r"^127(?:\.\d{1,3}){3}$")
 
 
 def _is_loopback(host):
     host = host.strip("[]").lower()
-    return host == "localhost" or host == "::1" or host.startswith("127.")
+    return host in ("localhost", "::1") or bool(_LOOPBACK4_RE.match(host))
 
 
 def _egress_host(tok, tool):
     """Нелокальный хост из одного токена, иначе None.
 
     Разбор поточечный (а не поиск по всей строке), чтобы `localhost` где-то в
-    аргументах не отменял egress, а `host:` и голый домен с хвостом аргументов
-    ловились (ревью 27.10.2026, финальный проход)."""
-    m = _SCHEME_RE.match(tok)
+    аргументах не отменял egress; при этом ловятся `host:/path`, голый домен с
+    хвостом и схема внутри флага (ревью 27.10.2026, подтверждающий проход)."""
+    m = _SCHEME_RE.search(tok)
     if m:
         return m.group(1)
     m = _USERHOST_RE.match(tok)
@@ -513,15 +522,18 @@ def _egress_host(tok, tool):
         return m.group(1)
     if tool == "socat":
         parts = tok.split(":")
-        if len(parts) >= 3 and parts[0].upper() in _SOCAT_TYPES:
+        if len(parts) >= 3 and _SOCAT_TYPE_RE.match(parts[0]):
             return parts[1]
     if tool in _HOSTCOLON_TOOLS:
         m = _HOSTCOLON_RE.match(tok)
         if m:
             return m.group(1)
     if tool not in _BARE_EXCLUDE:
-        if _BARE_DOMAIN_RE.match(tok) or _IPV6_RE.match(tok):
-            return tok
+        m = _BARE_DOMAIN_RE.match(tok)
+        if m:
+            return m.group(1)
+        if _IPV6_RE.match(tok):
+            return tok.strip("[]")
     return None
 
 
