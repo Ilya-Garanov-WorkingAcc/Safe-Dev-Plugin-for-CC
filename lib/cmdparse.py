@@ -1918,14 +1918,42 @@ def write_targets(cmd):
         # `-t DIR` / `--target-directory=DIR`: назначение — КАТАЛОГ-значение
         # флага, а все позиционные операнды — источники. Без этого
         # `cp -t ~/.ssh authorized_keys` писал мимо проверок (ревью 27.10.2026).
-        if "-t" in cmd.flags or "--target-directory" in cmd.flags:
-            tdir = _flag_value(cmd.args, ("-t", "--target-directory"))
-            if tdir is not None:
-                return [tdir]
-            return list(ops)                     # склейка `-at DIR`: строго, все
+        tdir, has_tdir = _target_directory(cmd.args)
+        if has_tdir:
+            return [tdir] if tdir is not None else list(ops)
         return ops[-1:] if ops else []
     # tee/truncate/shred/patch/rm и прочие: пишут (или удаляют) свои операнды.
     return ops
+
+
+_TARGET_DIR_LONG = "--target-directory"
+
+
+def _target_directory(args):
+    """(каталог-назначение, есть_ли_флаг) для cp/mv/install/ln.
+
+    Распознаёт все формы GNU, которыми можно задать `-t`, иначе `cp -t~/.ssh`
+    (склейка), `cp -vt~/.ssh` (кластер) и `cp --t=~/.ssh` (сокращение) обходили
+    проверку записи (ревью 27.10.2026, 2-й проход). Не смогли выделить значение
+    — (None, True): вызывающий тогда считает целями записи ВСЕ операнды (строго).
+    """
+    for i, a in enumerate(args):
+        if a.startswith("--"):
+            name, eq, val = a.partition("=")
+            # Однозначное сокращение длинной опции: `--t`…`--target-directory`.
+            if len(name) >= 3 and _TARGET_DIR_LONG.startswith(name):
+                if eq:
+                    return (val or None), True
+                return (args[i + 1] if i + 1 < len(args) else None), True
+        elif a.startswith("-") and len(a) > 1:
+            body = a[1:]                             # короткий кластер флагов
+            pos = body.find("t")
+            if pos != -1:
+                rest = body[pos + 1:]
+                if rest:
+                    return rest, True               # склейка: -t~/.ssh, -vt~/.ssh
+                return (args[i + 1] if i + 1 < len(args) else None), True
+    return None, False
 
 
 def _sed_in_place(flags):

