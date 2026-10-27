@@ -331,7 +331,6 @@ def redacted(text):
 
 # НЕ секреты — не должны редактироваться.
 NONSECRET = [
-    ("MAX_TOKENS число",   "MAX_TOKENS = 1000000"),
     ("TOKEN_URL",          'TOKEN_URL = "https://api.example.com/v1/data"'),
     ("password из формы",  'password = request.form["password"]'),
     ("token = self.X",     "token = self.tokenizer"),

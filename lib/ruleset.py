@@ -269,18 +269,20 @@ def match_command(cmd, rule, ctx=None):
         return False
 
     tg = m.get("target_glob")
+    tgn = m.get("target_glob_not")
     if tg:
         # Сверяем и как написано, и как разрешилось: `~/.bashrc` и
         # `/home/user/.bashrc` — один файл, а `../../etc` виден только после
-        # раскрытия.
+        # раскрытия. Исключения (tgn) снимаются ПОТОЧЕЧНО: правило срабатывает,
+        # если есть цель, попавшая под target_glob и НЕ попавшая под исключение.
+        # Иначе `rm -rf .git .git/index.lock` обходил правило целиком — один
+        # исключённый файл снимал защиту со всего `.git` (ревью 27.10.2026).
         targets = list(cmd.operands) + list(ctx.get("expanded_operands") or ())
-        if not any(any_glob(tg, t) for t in targets):
+        if not any(any_glob(tg, t) and not (tgn and any_glob(tgn, t))
+                   for t in targets):
             return False
-
-    tgn = m.get("target_glob_not")
-    if tgn:
-        # Исключения из target_glob: служебные файлы, удаление которых безвредно
-        # (.git/index.lock, *.sample) — FP-8.
+    elif tgn:
+        # tgn без target_glob: правило вето при любой попавшей под исключение цели.
         targets = list(cmd.operands) + list(ctx.get("expanded_operands") or ())
         if any(any_glob(tgn, t) for t in targets):
             return False

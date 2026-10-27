@@ -1063,7 +1063,7 @@ def _strip_redirects(words):
             here_strings.append(target.text)
         elif op in ("<", "0<"):
             stdin_file = rendered
-        elif _is_write_redirect(op):
+        elif _is_write_redirect(op, rendered):
             write_redirects.append(rendered)
         stdout_static &= _note_stdout(op, target.text, target, stdout_targets)
     stdout_file = None
@@ -1075,15 +1075,26 @@ def _strip_redirects(words):
             "write_redirects": write_redirects}
 
 
-def _is_write_redirect(op):
-    """Оператор пишет в файл-цель?
+_FD_DUP_TARGET_RE = re.compile(r"^\d+$")
+
+
+def _is_write_redirect(op, target=""):
+    """Оператор пишет в файл-цель `target`?
 
     Запись: `>`, `>>`, `>|`, `&>`, `&>>`, `N>`, `<>` (открывает на запись).
-    Не запись: дублирование/закрытие дескриптора (оканчивается на `&`:
-    `>&`, `<&`, `N>&`, `N>&-`), чтение (`<`, `N<`), here-string (`<<<`).
+    Также `>& СЛОВО` и `N>& СЛОВО`, где СЛОВО — не дескриптор: bash перенаправит
+    stdout+stderr в ФАЙЛ (эквивалент `&>`), и без этого `echo x >& ~/.ssh/...`
+    проходил мимо проверок (ревью 27.10.2026).
+    Не запись: дублирование/закрытие дескриптора — `>&2`, `2>&1`, `N>&-`, `<&`;
+    чтение (`<`, `N<`); here-string (`<<<`).
     """
-    if op.endswith("&"):            # >&, <&, 2>&, 3>& (с целью-числом или `-`)
-        return False
+    if op.endswith("&"):            # `>& ЦЕЛЬ` / `N>& ЦЕЛЬ` — цель отдельным словом
+        if "<" in op and ">" not in op:          # `<&` — дублирование на чтение
+            return False
+        tgt = (target or "").strip()
+        if tgt in ("-", "") or _FD_DUP_TARGET_RE.match(tgt):
+            return False                          # дескриптор/закрытие, не файл
+        return ">" in op                          # пишем в файл (fail-closed)
     return ">" in op
 
 
@@ -1904,6 +1915,14 @@ def write_targets(cmd):
         return [a.split("=", 1)[1] for a in cmd.operands
                 if a.startswith("of=") and len(a) > 3]
     if argv0 in _DEST_LAST_WRITERS:
+        # `-t DIR` / `--target-directory=DIR`: назначение — КАТАЛОГ-значение
+        # флага, а все позиционные операнды — источники. Без этого
+        # `cp -t ~/.ssh authorized_keys` писал мимо проверок (ревью 27.10.2026).
+        if "-t" in cmd.flags or "--target-directory" in cmd.flags:
+            tdir = _flag_value(cmd.args, ("-t", "--target-directory"))
+            if tdir is not None:
+                return [tdir]
+            return list(ops)                     # склейка `-at DIR`: строго, все
         return ops[-1:] if ops else []
     # tee/truncate/shred/patch/rm и прочие: пишут (или удаляют) свои операнды.
     return ops

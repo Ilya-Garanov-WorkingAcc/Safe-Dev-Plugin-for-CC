@@ -92,7 +92,9 @@ def build_context(cmd, cwd):
         # Путь внутри временного каталога (/tmp, /var/tmp, mktemp): работа там
         # не считается разрушением ВНЕ cwd (FP-7). Проверку на корень/дом это НЕ
         # отменяет — `rm ~` ловится, даже если HOME оказался под /tmp.
-        return cmdparse.is_temp_path(op) or cmdparse.is_temp_path(exp)
+        # Сверяем ТОЛЬКО по realpath (`exp`): симлинк `/tmp/lnk -> /home/...`
+        # имеет temp-подобный сырой путь, но ведёт наружу (ревью 27.10.2026).
+        return cmdparse.is_temp_path(exp)
     # Только цели записи-редиректа: `echo x 2>&1` не пишет в файл «1» (FP-3).
     expanded_redirects = [cmdparse.expand_operand(r, base)
                           for r in cmd.write_redirects[:MAX_EXPANDED_OPERANDS]]
@@ -316,12 +318,18 @@ def _is_root_target(raw, expanded, cwd):
     return here != expanded and here.startswith(expanded.rstrip("/") + os.sep)
 
 
-# Флаги git, значение которых — свободный текст (сообщение, шаблон поиска):
-# их значения не должны попадать в семантический матчинг, иначе `git commit
-# -m "stash drop"` и `git log -S prune` ловятся как разрушительные (FP-4).
-_GIT_DROP_VALUE_FLAGS = frozenset({
-    "-m", "--message", "-F", "--file", "--grep", "--author", "--committer",
-    "-S", "-G", "--pretty", "--format", "--date", "--fixup", "--squash"})
+# Значения-сообщения git (свободный текст): отбрасываются, иначе `git commit
+# -m "stash drop"` ловится как разрушительное (FP-4). Но только у подкоманд,
+# где флаг и правда несёт сообщение: у `git branch -m old new` это
+# ПЕРЕИМЕНОВАНИЕ, и съедание значения спрятало бы следующий `-f` (ревью 27.10).
+_GIT_MESSAGE_FLAGS = frozenset({"-m", "--message", "-F", "--file",
+                                "--fixup", "--squash"})
+_GIT_MESSAGE_SUBS = frozenset({"commit", "tag", "stash", "merge", "notes",
+                               "revert", "cherry-pick", "am"})
+# Значения-шаблоны поиска/формата: безопасно отбрасывать у любой подкоманды.
+_GIT_SEARCH_FLAGS = frozenset({
+    "--grep", "--author", "--committer", "-S", "-G", "--pretty", "--format",
+    "--date"})
 # Глобальные опции git со значением — их значение не подкоманда.
 _GIT_GLOBAL_VALUE_FLAGS = frozenset({
     "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path",
@@ -331,31 +339,47 @@ _GIT_GLOBAL_VALUE_FLAGS = frozenset({
 def _git_semantic(cmd):
     """(подкоманда git, очищенный текст аргументов).
 
-    Из текста выброшены значения флагов сообщения/поиска: по нему git-правила
-    матчат подкоманду и её опции, а не содержимое коммит-сообщения.
+    `git_text` строится НАЧИНАЯ С ПОДКОМАНДЫ: глобальные опции (`-C dir`,
+    `--no-pager`, `-c k=v`, `-P`) и их значения отброшены, иначе `^`-якорь в
+    git-правилах не матчил `git -C . stash drop` (ревью 27.10.2026). Из
+    оставшегося выброшены значения сообщения/поиска.
     """
     if cmd.argv0 != "git":
         return None, ""
     args = list(cmd.args)
-    out, sub, i = [], None, 0
+    # 1) Найти подкоманду, пропуская глобальные опции и их значения.
+    sub, start, i = None, len(args), 0
+    while i < len(args):
+        a = args[i]
+        if not a.startswith("-"):
+            prev = args[i - 1] if i > 0 else ""
+            if prev in _GIT_GLOBAL_VALUE_FLAGS:
+                i += 1
+                continue
+            sub, start = a, i
+            break
+        i += 2 if a in _GIT_GLOBAL_VALUE_FLAGS else 1
+    if sub is None:
+        return None, ""
+    # 2) Текст от подкоманды; у message-подкоманд глушим и значения сообщений.
+    drop = _GIT_SEARCH_FLAGS
+    if sub in _GIT_MESSAGE_SUBS:
+        drop = drop | _GIT_MESSAGE_FLAGS
+    out, i = [], start
     while i < len(args):
         a = args[i]
         head = a.split("=", 1)[0]
-        if a in _GIT_DROP_VALUE_FLAGS:
+        if a in drop:
             i += 2                                   # флаг + отдельное значение
             continue
-        if "=" in a and head in _GIT_DROP_VALUE_FLAGS:
+        if "=" in a and head in drop:
             i += 1                                   # --grep=foo
             continue
         if (a.startswith("-") and not a.startswith("--") and len(a) > 2
-                and a[:2] in _GIT_DROP_VALUE_FLAGS):
+                and a[:2] in drop):
             i += 1                                   # -mMSG, -Sfoo (склеенно)
             continue
         out.append(a)
-        if sub is None and not a.startswith("-"):
-            prev = args[i - 1] if i > 0 else ""
-            if prev not in _GIT_GLOBAL_VALUE_FLAGS:
-                sub = a
         i += 1
     return sub, " ".join(out)
 
@@ -454,13 +478,25 @@ _EGRESS_ARGV0 = {"curl", "wget", "nc", "ncat", "socat", "scp", "sftp", "ssh",
                  "rsync", "ftp", "telnet", "http", "httpie"}
 # Инструменты, аргумент которых — URL/хост (а не локальный файл).
 _URL_ARGV0 = {"curl", "wget", "http", "httpie"}
+# Инструменты соединения: голый хост/`user@host` — это и есть удалённая цель
+# (`nc evil.com 4444`, `ssh user@evil.com cmd`). Без bare-host они обходились
+# (ревью 27.10.2026).
+_CONNECT_ARGV0 = {"ssh", "nc", "ncat", "telnet", "ftp", "socat"}
 # URL/хост у curl/wget: схема или домен с TLD.
 _URL_RE = re.compile(r"://|(?:^|\s)[\w.-]+\.[a-z]{2,}(?:[/:?]|$)")
-# Удалённая цель у scp/rsync/ssh/nc: схема, `user@host:` или `host:path`.
+# Хост у инструментов соединения: схема, `user@host`, голый домен с TLD или IPv4.
+_HOST_RE = re.compile(
+    r"://|@[\w.-]+|"
+    r"(?:^|\s)(?:[\w-]+\.)+[a-z]{2,}(?:[\s:/]|$)|"
+    r"(?:^|\s)\d{1,3}(?:\.\d{1,3}){3}(?:[\s:/]|$)")
+# Удалённая цель у scp/rsync/sftp: схема, `user@host:` или `host:path`.
 # Локальный файл (`notes.md`, `backup/`) сюда не попадает (FP-6): без этого
 # любая локальная rsync/scp в tainted-сессии ложно считалась egress.
 _REMOTE_RE = re.compile(r"://|@[\w.-]+:|(?:^|\s)[\w][\w.-]*:(?:/|~|\w)")
-_LOCALHOST_RE = re.compile(r"localhost|127\.0\.0\.1|::1")
+# localhost/loopback как ЦЕЛЫЙ хост-токен: `notlocalhost.evil.com` и `::1`
+# внутри `2001:db8::1` не должны давать исключение (ревью 27.10.2026).
+_LOCALHOST_RE = re.compile(
+    r"(?:^|[\s@/\[])(?:localhost|127\.0\.0\.1|::1)(?=[\s:/\]]|$)")
 
 
 def _tainted_egress(data, command):
@@ -479,7 +515,12 @@ def _tainted_egress(data, command):
             joined = " ".join(cmd.args)
             if _LOCALHOST_RE.search(joined):
                 continue
-            rx = _URL_RE if cmd.argv0 in _URL_ARGV0 else _REMOTE_RE
+            if cmd.argv0 in _URL_ARGV0:
+                rx = _URL_RE
+            elif cmd.argv0 in _CONNECT_ARGV0:
+                rx = _HOST_RE
+            else:                                    # scp/rsync/sftp
+                rx = _REMOTE_RE
             if rx.search(joined):
                 return True
     return False
