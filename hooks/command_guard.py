@@ -473,34 +473,56 @@ def decide(matches, session_id, agent_id):
 
 
 # Команды, выводящие данные в сеть. В «запятнанной» инъекцией сессии каждая
-# такая команда с внешним адресом уходит в ask.
+# такая команда с НЕлокальным адресом уходит в ask.
 _EGRESS_ARGV0 = {"curl", "wget", "nc", "ncat", "socat", "scp", "sftp", "ssh",
                  "rsync", "ftp", "telnet", "http", "httpie"}
-# Инструменты, аргумент которых — URL/хост (а не локальный файл).
-_URL_ARGV0 = {"curl", "wget", "http", "httpie"}
-# Инструменты соединения: голый хост/`user@host` — это и есть удалённая цель
-# (`nc evil.com 4444`, `ssh user@evil.com cmd`). Без bare-host они обходились
-# (ревью 27.10.2026).
-_CONNECT_ARGV0 = {"ssh", "nc", "ncat", "telnet", "ftp", "socat"}
-# URL/хост у curl/wget: схема или домен с TLD.
-_URL_RE = re.compile(r"://|(?:^|\s)[\w.-]+\.[a-z]{2,}(?:[/:?]|$)", re.I)
-# Хост у инструментов соединения: схема, `user@host`, голый домен с TLD
-# (в т. ч. с завершающей точкой) или IPv4. Регистр не важен (EVIL.COM).
-_HOST_RE = re.compile(
-    r"://|@[\w.-]+|"
-    r"(?:^|\s)(?:[\w-]+\.)+[a-z]{2,}\.?(?:[\s:/]|$)|"
-    r"(?:^|\s)\d{1,3}(?:\.\d{1,3}){3}(?:[\s:/]|$)", re.I)
-# Удалённая цель у scp/rsync/sftp: схема, `user@host:` или `host:path`.
-# Локальный файл (`notes.md`, `backup/`) сюда не попадает (FP-6): без этого
-# любая локальная rsync/scp в tainted-сессии ложно считалась egress.
-_REMOTE_RE = re.compile(r"://|@[\w.-]+:|(?:^|\s)[\w][\w.-]*:(?:/|~|\w)")
-# localhost/loopback как ЦЕЛЫЙ хост-токен: `notlocalhost.evil.com` не исключать.
-# `localhost`/`127.0.0.1` разрешаем и после `:` (форма `TCP:localhost:80` у socat);
-# внутри IPv6 они не встречаются. А `::1` — только со строгой границей (без `:`
-# слева), иначе он совпал бы внутри `2001:db8::1` (ревью 27.10.2026).
-_LOCALHOST_RE = re.compile(
-    r"(?:^|[\s@/:\[])(?:localhost|127\.0\.0\.1)(?=[\s:/\]]|$)"
-    r"|(?:^|[\s@/\[])::1(?=[\s/\]]|$)")
+# scp/rsync: голый аргумент — локальный файл, удалённая цель только через `:`
+# или `user@`. Для остальных голый домен/IP — это адрес.
+_BARE_EXCLUDE = {"scp", "rsync"}
+# scp/rsync/sftp понимают форму `host:path` и `host::module`.
+_HOSTCOLON_TOOLS = {"scp", "rsync", "sftp"}
+# Типы адресов socat, у которых host — второе поле: `TCP:host:port`.
+_SOCAT_TYPES = {"TCP", "TCP4", "TCP6", "UDP", "UDP4", "UDP6", "OPENSSL",
+                "OPENSSL-CONNECT", "SOCKS4", "SOCKS4A", "SOCKS5", "PROXY",
+                "SCTP", "SCTP4", "SCTP6"}
+
+_SCHEME_RE = re.compile(r"^[a-z][\w+.-]*://(?:[^/@\s]*@)?(\[[^\]\s]+\]|[^/:\s]+)", re.I)
+_USERHOST_RE = re.compile(r"^[^@/\s]+@(\[[^\]\s]+\]|[^:/\s]+)")
+_HOSTCOLON_RE = re.compile(r"^(\[[^\]\s]+\]|[A-Za-z0-9.\-]+)::?(?![\\/])")
+_BARE_DOMAIN_RE = re.compile(
+    r"^(?:(?:[\w-]+\.)+[a-z]{2,}\.?|\d{1,3}(?:\.\d{1,3}){3})$", re.I)
+_IPV6_RE = re.compile(r"^\[?(?:[0-9a-f]{0,4}:){2,}[0-9a-f]{0,4}\]?$", re.I)
+
+
+def _is_loopback(host):
+    host = host.strip("[]").lower()
+    return host == "localhost" or host == "::1" or host.startswith("127.")
+
+
+def _egress_host(tok, tool):
+    """Нелокальный хост из одного токена, иначе None.
+
+    Разбор поточечный (а не поиск по всей строке), чтобы `localhost` где-то в
+    аргументах не отменял egress, а `host:` и голый домен с хвостом аргументов
+    ловились (ревью 27.10.2026, финальный проход)."""
+    m = _SCHEME_RE.match(tok)
+    if m:
+        return m.group(1)
+    m = _USERHOST_RE.match(tok)
+    if m:
+        return m.group(1)
+    if tool == "socat":
+        parts = tok.split(":")
+        if len(parts) >= 3 and parts[0].upper() in _SOCAT_TYPES:
+            return parts[1]
+    if tool in _HOSTCOLON_TOOLS:
+        m = _HOSTCOLON_RE.match(tok)
+        if m:
+            return m.group(1)
+    if tool not in _BARE_EXCLUDE:
+        if _BARE_DOMAIN_RE.match(tok) or _IPV6_RE.match(tok):
+            return tok
+    return None
 
 
 def _tainted_egress(data, command):
@@ -515,22 +537,15 @@ def _tainted_egress(data, command):
     except Exception:
         return False
     for cmd in cmds:
-        if cmd.argv0 in _EGRESS_ARGV0:
-            joined = " ".join(cmd.args)
-            if _LOCALHOST_RE.search(joined):
+        if cmd.argv0 not in _EGRESS_ARGV0:
+            continue
+        for tok in cmd.args:
+            # Флаг-опция — не адрес (кроме случая, когда в ней есть схема/`@`).
+            if tok.startswith("-") and "://" not in tok and "@" not in tok:
                 continue
-            if cmd.argv0 in _URL_ARGV0:
-                if _URL_RE.search(joined):
-                    return True
-            elif cmd.argv0 in _CONNECT_ARGV0:
-                # Голый хост И форма `TCP:host:port`/IPv6 (`_REMOTE_RE`): socat
-                # пишет цель как `TCP:evil.com:80`, без второй проверки это
-                # обходилось (ревью 27.10.2026, 2-й проход).
-                if _HOST_RE.search(joined) or _REMOTE_RE.search(joined):
-                    return True
-            else:                                    # scp/rsync/sftp
-                if _REMOTE_RE.search(joined):
-                    return True
+            host = _egress_host(tok, cmd.argv0)
+            if host and not _is_loopback(host):
+                return True
     return False
 
 
@@ -588,8 +603,9 @@ def main():
     if len(command) > MAX_COMMAND_BYTES:
         _ask_unparsed(data, command, "command_too_long")
 
-    if _tainted_egress(data, command):
-        _ask_tainted(data, command)
+    # Egress в запятнанной сессии оценивается, но решение принимается ПОСЛЕ
+    # правил: deny правила не должен подменяться на ask (ревью 27.10.2026).
+    egress = _tainted_egress(data, command)
 
     cmds, warnings = cmdparse.parse(command)
     # Предупреждения парсера из файлов скриптов не эскалируются: в любом
@@ -650,6 +666,10 @@ def main():
                  or best["exempt"] is not None else best["decision"])
     if unresolved and effective in (policy.LOG, policy.WARN):
         _ask_unparsed(data, command, unresolved[0])
+
+    # Egress-ask не перебивает deny правила, но escalates всё менее строгое.
+    if egress and effective != policy.DENY:
+        _ask_tainted(data, command)
 
     if best is None or best["exempt"] is not None or best["suppressed"]:
         hookio.passthrough()

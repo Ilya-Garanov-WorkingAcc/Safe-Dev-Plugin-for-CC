@@ -103,12 +103,18 @@ def _match_bash(command, cwd):
         writers = ruleset.bash_writers(rule)
         for cmd in cmds:
             base = cmdparse.effective_cwd(cmd, cwd) or cwd
+            # Чтение файла через редирект (`< f`, `N< f`) — это чтение цели
+            # ЛЮБОЙ командой, даже не из readers: `tee c < id_rsa`, `tr < id_rsa`,
+            # `cat 3< id_rsa`, `{ …; } < id_rsa` (ревью 27.10.2026). Дублирование
+            # (`2>&1`), here-doc и here-string в read_redirects не входят (FP-3).
+            if cmd.read_redirects:
+                hit = _bash_hit(rule, list(cmd.read_redirects), base, "read")
+                if hit:
+                    return rule, hit
             if readers and cmd.argv0 in readers:
-                # Чтение через stdin-редирект (`base64 < id_rsa`) — это чтение
-                # файла-цели; дублирование дескрипторов (`2>&1`) файлом не
-                # является и в stdin_file не попадает (FP-3).
-                stdin = [cmd.stdin_file] if cmd.stdin_file else []
-                candidates = list(cmd.operands) + _at_values(cmd) + stdin
+                # Операнды-источники читают только известные readers (`cat f`),
+                # иначе `rm f` считалось бы чтением.
+                candidates = list(cmd.operands) + _at_values(cmd)
                 hit = _bash_hit(rule, candidates, base, "read")
                 if hit:
                     return rule, hit

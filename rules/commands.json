@@ -618,7 +618,7 @@
       "match": {
         "kind": "command",
         "argv0": ["git"],
-        "args_regex_any": ["(?:^| )-c\\s+\\S*(?:core\\.(?:fsmonitor|hookspath|sshcommand)|alias\\.\\S+=\\s*!|\\S+\\.\\S*textconv)", "(?:^| )-c\\s+\\S*core\\.(?:pager|editor)=(?!(?:cat|less|more|true|false|head|tail|nl)(?:\\s|$))\\S", "(?:^| )(?:--upload-pack|--receive-pack|--exec)=", "ext::", "(?:^| )config\\b.*(?:core\\.(?:fsmonitor|hookspath|sshcommand)|alias\\.\\S+\\s+!)"]
+        "args_regex_any": ["(?:^| )-c\\s+\\S*(?:core\\.(?:fsmonitor|hookspath|sshcommand)|alias\\.\\S+=\\s*!|\\S+\\.\\S*textconv)", "(?:^| )-c\\s+\\S*core\\.(?:pager|editor)=", "(?:^| )(?:--upload-pack|--receive-pack|--exec)=", "ext::", "(?:^| )config\\b.*(?:core\\.(?:fsmonitor|hookspath|sshcommand)|alias\\.\\S+\\s+!)"]
       },
       "message": "Запуск git с ключами, исполняющими произвольную команду (core.fsmonitor, core.hooksPath, alias с !, --upload-pack, ext::).",
       "remediation": "Эти настройки задают команды, которые git выполнит сам. Нужное поведение настраивается в репозитории человеком.",
@@ -740,7 +740,7 @@
         "kind": "command",
         "argv0": ["rm", "unlink", "shred", "truncate"],
         "target_glob": ["**/.git", "**/.git/**", ".git", ".git/**"],
-        "target_glob_not": ["**/.git/index.lock", ".git/index.lock", "**/*.sample", "**/.git/*.lock", ".git/*.lock"]
+        "target_glob_not": ["**/.git/index.lock", ".git/index.lock", "**/.git/hooks/*.sample", ".git/hooks/*.sample", "**/.git/*.lock", ".git/*.lock"]
       },
       "message": "Удаление служебных файлов git (.git, .git/refs, .git/HEAD) — потеря истории репозитория.",
       "remediation": "Чтобы разорвать связь с git, достаточно переинициализации по отдельной процедуре; удалять .git вручную не нужно.",

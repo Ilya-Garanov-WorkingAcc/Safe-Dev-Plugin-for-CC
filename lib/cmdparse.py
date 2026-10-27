@@ -304,6 +304,11 @@ class Cmd:
     # `>&2`, `3>&-`), чтение (`<`, `0<`) и here-string (`<<<`) сюда не входят:
     # иначе `echo x 2>&1` принималось за запись в файл «1» (FP-3, 26.10.2026).
     write_redirects: tuple = ()
+    # Подмножество redirects: цели-файлы, из которых идёт ЧТЕНИЕ (`<`, `0<`,
+    # `N<`). Нужно, чтобы `tee c < id_rsa`, `cat 3< id_rsa` и `{ …; } < id_rsa`
+    # ловились как чтение секрета независимо от команды (ревью 27.10.2026).
+    # `<<`, `<<<`, `<&` сюда не входят.
+    read_redirects: tuple = ()
     assignments: tuple = ()
     var_argv0: bool = False
     # Имя команды как написано (`./deploy/e2e-test.sh`, `/usr/bin/rm`): argv0
@@ -948,6 +953,7 @@ def _build(words, depth, origin, position, pipeline_index, state):
                       depth=depth, origin=origin, pipeline=pipeline_index,
                       position=position, redirects=tuple(red["redirects"]),
                       write_redirects=tuple(red["write_redirects"]),
+                      read_redirects=tuple(red["read_redirects"]),
                       assignments=tuple(assignments), argv0_text=":",
                       stdout_file=red["stdout_file"] or "",
                       stdin_file=red["stdin_file"] or "", cwd=state.get("cd"))
@@ -992,6 +998,7 @@ def _build(words, depth, origin, position, pipeline_index, state):
               depth=depth, origin=origin, raw=raw, pipeline=pipeline_index,
               position=position, redirects=tuple(red["redirects"]),
               write_redirects=tuple(red["write_redirects"]),
+                      read_redirects=tuple(red["read_redirects"]),
               assignments=tuple(assignments), var_argv0=var_argv0,
               argv0_text=_render(head).strip().lstrip("\\"),
               here_strings=tuple(red["here_strings"]),
@@ -1038,6 +1045,7 @@ def _strip_redirects(words):
     """
     out, redirects, heredocs, here_strings, subs = [], [], [], [], []
     write_redirects = []
+    read_redirects = []
     stdout_targets, stdout_static, stdin_file = [], True, None
     i = 0
     while i < len(words):
@@ -1063,6 +1071,9 @@ def _strip_redirects(words):
             here_strings.append(target.text)
         elif op in ("<", "0<"):
             stdin_file = rendered
+            read_redirects.append(rendered)
+        elif _READ_REDIR_RE.match(op):               # `N<` — чтение файла в дескриптор
+            read_redirects.append(rendered)
         elif _is_write_redirect(op, rendered):
             write_redirects.append(rendered)
         stdout_static &= _note_stdout(op, target.text, target, stdout_targets)
@@ -1072,7 +1083,11 @@ def _strip_redirects(words):
     return {"words": out, "redirects": redirects, "stdout_file": stdout_file,
             "heredocs": heredocs, "here_strings": here_strings,
             "stdin_file": stdin_file, "subs": subs,
-            "write_redirects": write_redirects}
+            "write_redirects": write_redirects, "read_redirects": read_redirects}
+
+
+# `<`, `0<`, `N<` — чтение файла (но не `<<`, `<<<`, `<&`).
+_READ_REDIR_RE = re.compile(r"^\d*<$")
 
 
 _FD_DUP_TARGET_RE = re.compile(r"^\d+$")
@@ -1896,8 +1911,13 @@ def is_temp_path(operand):
 
 
 # Утилиты, которые пишут в ПОСЛЕДНИЙ позиционный операнд (назначение); их
-# первые операнды — источники, то есть чтение (`cp secret dst`, `mv a b`).
-_DEST_LAST_WRITERS = frozenset({"cp", "mv", "install", "ln"})
+# первые операнды — источники, то есть чтение (`cp secret dst`). `mv` сюда НЕ
+# входит: он УДАЛЯЕТ источники, поэтому у него под контролем все операнды
+# (ревью 27.10.2026).
+_DEST_LAST_WRITERS = frozenset({"cp", "install", "ln"})
+# Perl/ruby-опции, забирающие остаток токена как значение: после них буквы — не
+# флаги, поэтому `-i` в `-Idir` (значение) не считается in-place-правкой.
+_PERL_VALUE_OPTS = frozenset("eImMF0SxVh")
 
 
 def write_targets(cmd):
@@ -1910,10 +1930,19 @@ def write_targets(cmd):
     argv0 = _basename(cmd.argv0)
     ops = [o for o in cmd.operands if not o.startswith("-")]
     if argv0 == "sed":
-        return ops if _sed_in_place(cmd.flags) else []
+        targets = list(ops) if _sed_in_place(cmd.flags) else []
+        return targets + _sed_write_files(cmd)       # `w FILE`, `s///w FILE`
     if argv0 == "dd":
         return [a.split("=", 1)[1] for a in cmd.operands
                 if a.startswith("of=") and len(a) > 3]
+    if argv0 in ("perl", "ruby") and _perl_inplace(cmd.args):
+        return list(ops)                             # -i / -pi: правка на месте
+    if argv0 in ("awk", "gawk", "mawk") and _awk_inplace(cmd):
+        return list(ops)                             # gawk -i inplace
+    if argv0 == "mv":
+        # mv УДАЛЯЕТ источники и пишет назначение → под контролем все операнды.
+        tdir, _has = _target_directory(cmd.args)
+        return list(ops) + ([tdir] if tdir else [])
     if argv0 in _DEST_LAST_WRITERS:
         # `-t DIR` / `--target-directory=DIR`: назначение — КАТАЛОГ-значение
         # флага, а все позиционные операнды — источники. Без этого
@@ -1924,6 +1953,42 @@ def write_targets(cmd):
         return ops[-1:] if ops else []
     # tee/truncate/shred/patch/rm и прочие: пишут (или удаляют) свои операнды.
     return ops
+
+
+def _perl_inplace(args):
+    """perl/ruby с `-i`/`-pi`/`-i.bak`: редактирование файла на месте.
+
+    Буквы после опции-со-значением (`-I dir`, `-e code`) — это значение, а не
+    флаги, поэтому `i` в `-Idir` не считается in-place (ревью 27.10.2026).
+    """
+    for a in args:
+        if not (a.startswith("-") and not a.startswith("--") and len(a) > 1):
+            continue
+        for ch in a[1:]:
+            if ch == "i":
+                return True
+            if ch in _PERL_VALUE_OPTS:
+                break                                # остаток токена — значение
+    return False
+
+
+def _awk_inplace(cmd):
+    """gawk -i inplace: расширение, переписывающее файлы-операнды."""
+    return "-i" in cmd.flags and "inplace" in cmd.operands
+
+
+# Команда sed `w FILE` и флаг `s///w FILE` пишут в FILE даже без -i.
+_SED_W_CMD_RE = re.compile(r"(?:^|[;{}\n])[0-9$,~!/ \t]*[wW][ \t]+([^;{}\n]+)")
+_SED_S_W_RE = re.compile(
+    r"s(/)(?:\\.|[^/\\\n])*/(?:\\.|[^/\\\n])*/[a-zA-Z0-9]*[wW][ \t]+([^;{}\n]+)")
+
+
+def _sed_write_files(cmd):
+    """Файлы-цели команд записи внутри sed-скрипта (`w f`, `s/…/…/w f`)."""
+    text = " \n ".join(cmd.args)
+    files = [m.group(1).strip() for m in _SED_W_CMD_RE.finditer(text)]
+    files += [m.group(2).strip() for m in _SED_S_W_RE.finditer(text)]
+    return [f for f in files if f]
 
 
 _TARGET_DIR_LONG = "--target-directory"

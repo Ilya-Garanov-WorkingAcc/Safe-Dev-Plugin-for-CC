@@ -245,11 +245,16 @@ for label, command in GITBLOCK:
     d = bash(command)
     check("FP-4 блок: {}".format(label), blocked(d), d)
 
-print("=== FP-5: безопасные значения git -c (pager/editor) не блок ===")
+# FP-5 ПЕРЕСМОТРЕН (ревью 27.10.2026, A1): исключение `core.pager=cat` давало
+# обход `core.pager=cat | sh` — плоский regex не отличает безопасный пейджер от
+# значения с shell. core.pager/editor теперь блокируются всегда (строго;
+# штатная альтернатива — `git --no-pager`). Контроль безопасных git -c остаётся
+# на безвредных ключах, не pager/editor.
+print("=== FP-5 (пересмотр): безопасные git -c (не pager/editor) не блок ===")
 for label, command in [
-        ("core.pager=cat",     "git -c core.pager=cat log"),
-        ("core.editor=true",   "git -c core.editor=true rebase --continue"),
-        ("core.pager=less",    "git -c core.pager=less diff")]:
+        ("-c user.name",   "git -c user.name=Bob log"),
+        ("-c color.ui",    "git -c color.ui=always diff"),
+        ("-c core.autocrlf", "git -c core.autocrlf=input status")]:
     d = bash(command)
     check("FP-5 не блок: {}".format(label), not blocked(d), d)
 
