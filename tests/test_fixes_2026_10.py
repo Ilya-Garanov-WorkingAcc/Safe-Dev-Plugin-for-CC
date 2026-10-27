@@ -294,11 +294,14 @@ def tainted(sid):
     return bool(_policy.state_get(sid, "injection_tainted"))
 
 
-# Чтение локального файла плагина (Read и Bash cat) не метит сессию.
-run_scanner("fp6-read", "Read", {"file_path": os.path.join(WORK, "hooks/x.py")}, INJ)
-check("FP-6 Read локального кода не метит", not tainted("fp6-read"), tainted("fp6-read"))
-run_scanner("fp6-cat", "Bash", {"command": "cat hooks/path_guard.py"}, INJ)
-check("FP-6 Bash cat локального кода не метит", not tainted("fp6-cat"), tainted("fp6-cat"))
+# Чтение файлов САМОГО плагина (Read и Bash cat) не метит сессию: в его
+# исходниках/правилах формы атак лежат как данные (FP-6). Пересмотрено 28.10.2026:
+# чтение ЧУЖИХ локальных файлов (клонированный репозиторий) теперь метит — см.
+# H4 в test_hardening_2026_10.py. Здесь проверяется сохранённое исключение «свой».
+run_scanner("fp6-read", "Read", {"file_path": os.path.join(ROOT, "hooks", "path_guard.py")}, INJ)
+check("FP-6 Read своего кода не метит", not tainted("fp6-read"), tainted("fp6-read"))
+run_scanner("fp6-cat", "Bash", {"command": "cat " + os.path.join(ROOT, "rules", "injection.json")}, INJ)
+check("FP-6 Bash cat своего кода не метит", not tainted("fp6-cat"), tainted("fp6-cat"))
 
 # Контроль: сильная инъекция из внешнего источника по-прежнему метит сессию.
 run_scanner("fp6-web", "WebFetch", {"url": "https://x.example"}, STRONG)

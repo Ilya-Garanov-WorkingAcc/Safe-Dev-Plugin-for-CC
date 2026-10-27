@@ -30,8 +30,8 @@ PLACEHOLDER = "[REDACTED:{}]"
 _KEYWORD_VALUE_RE = re.compile(
     r"^(?:string|str|int|integer|bool|boolean|true|false|null|none|nil|required|"
     r"optional|number|object|array|any|void|undefined|empty|bearer|basic|digest|"
-    r"token|secret|password|changeme|changeit|placeholder|example|sample|dummy|"
-    r"redacted|foobar|x{3,}|"
+    r"token|secret|password|placeholder|example|"
+    r"redacted|x{3,}|"
     # Короткое число/константа (порт, таймаут, флаг). Длинные цифровые значения
     # НЕ в whitelist: числовой пароль/PIN выглядит так же.
     r"[+-]?\d{1,3}(?:\.\d{1,3})?|"

@@ -163,7 +163,9 @@ VALUE_FLAGS = {
     "ssh": {"-i", "-p", "-o", "-l"},
     "tar": {"-f", "--file", "-C"},
     "grep": {"-e", "-f", "--include", "--exclude"},
-    "sed": {"-e", "-f", "-i"},
+    "sed": {"-e", "-f"},                 # -i НЕ берёт отдельный аргумент: суффикс
+    #                                      присоединён (`-i.bak`), иначе `sed -e …
+    #                                      -i FILE` съедал бы FILE (ревью 28.10.2026)
     "awk": {"-v", "-f"},
     "docker": {"-e", "-v", "--name", "-p", "--env", "--volume"},
     "openssl": {"-in", "-out", "-k", "-K", "-iv"},
@@ -211,7 +213,16 @@ INTERPRETER_FS_RE = re.compile(
     r"FileUtils\.(?:rm|remove)|File\.(?:delete|unlink)|remove_entry|Dir\.rmdir|"
     # pathlib Path(...).unlink()/.rmdir(); perl/ruby unlink/rmdir/truncate
     r"\.unlink\s*\(|\.rmdir\s*\(|"
-    r"\bunlink\b|\brmdir\s*\(|\btruncate\s*\(")
+    r"\bunlink\b|\brmdir\s*\(|\btruncate\s*\(|"
+    # Обфускация доступа к ФС-методам (ревью 28.10.2026). Срабатывает только на
+    # коде интерпретатора (-c/-e/-r) и ведёт к ask, поэтому допустимо строго.
+    r"from\s+os\s+import\b[^\n]{0,200}\b(?:remove|unlink|rmdir|removedirs|truncate)\b|"
+    r"from\s+shutil\s+import\b[^\n]{0,200}\b(?:rmtree|move)\b|"
+    r"import\s+os\s+as\s+(\w{1,20})\b[\s\S]{0,300}?\b\1\.(?:remove|unlink|rmdir|removedirs|truncate)\b|"
+    r"__import__\s*\(\s*['\"](?:os|shutil)['\"]|"
+    r"getattr\s*\(\s*(?:os|shutil|pathlib|fs)\b|"
+    r"require\s*\(\s*['\"]fs(?:/promises)?['\"]|"
+    r"fs\.promises\b|promises\.rm\b")
 
 # awk, исполняющий shell: пайп в команду (`print … | "sh"`, `"cmd" | getline`).
 # `system(...)` ловит INTERPRETER_EXEC_RE через _interpreter_code (G3).
@@ -1501,27 +1512,24 @@ def _expand(cmd, args, depth, state, has_heredoc=False):
         out.extend(_parse_text(args[0], depth + 1, SUBSHELL, state))
 
     if argv0 == "find" and "--exec" in cmd.flags:
-        exec_cmd = _find_exec_command(args)
-        if exec_cmd:
-            # Область действия `-exec` — дерево под корнями поиска find, а не
-            # плейсхолдер `{}`. Подставляя корни вместо `{}`, получаем реальную
-            # цель: `find ~ -exec rm {} +` → `rm ~` (ловится delete-root),
-            # `find . -exec rm {} +` → `rm .` (чистка в cwd, не блокируется).
-            # Так закрыт G2 (нерекурсивное удаление через find мимо правил) без
-            # ложного ask на чистке внутри проекта.
-            roots = _find_search_roots(args) or ["."]
+        # Область действия `-exec` — дерево под корнями поиска find, а не
+        # плейсхолдер `{}`. Подставляя корни вместо `{}`, получаем реальную
+        # цель: `find ~ -exec rm {} +` → `rm ~` (ловится delete-root),
+        # `find . -exec rm {} +` → `rm .` (чистка в cwd, не блокируется).
+        # Разбираются ВСЕ `-exec` (а не только первая), иначе второй `-exec rm`
+        # проходил мимо правил (ревью 28.10.2026).
+        roots = _find_search_roots(args) or ["."]
+        for exec_cmd in _find_exec_commands(args):
             parts = []
             for a in exec_cmd:
                 if a == "{}":
                     parts.extend(roots)
                 else:
                     parts.append(a)
-            if "{}" not in exec_cmd:
-                # Цель не подставляется явно (`-exec rm -rf {} +` без {} —
-                # редко; либо `-exec sh -c '…'`): корни добавляем только для
-                # прямых файловых утилит, чтобы не портить `sh -c`.
-                if _basename(exec_cmd[0]) in _FIND_DIRECT_TARGETS:
-                    parts.extend(roots)
+            if "{}" not in exec_cmd and _basename(exec_cmd[0]) in _FIND_DIRECT_TARGETS:
+                # Цель не подставлена явно: корни добавляем только прямым файловым
+                # утилитам, чтобы не портить `sh -c`.
+                parts.extend(roots)
             line = " ".join(_quote(a) for a in parts)
             out.extend(_parse_text(line, depth + 1, cmd.origin, state))
 
@@ -1589,7 +1597,10 @@ def _expand(cmd, args, depth, state, has_heredoc=False):
                 state["warnings"].append("shell_stdin_unresolved")
 
     if argv0 in INTERPRETERS:
-        code = _flag_value(args, ("-c", "-e", "-E", "--eval", "--print"))
+        code_flags = ("-c", "-e", "-E", "--eval", "--print")
+        if argv0 == "php":
+            code_flags = code_flags + ("-r",)    # php исполняет код из -r
+        code = _flag_value(args, code_flags)
         if code:
             out.extend(_interpreter_code(code, depth, state))
 
@@ -1673,16 +1684,31 @@ def _xargs_replacement(args):
 
 
 def _find_exec_command(args):
-    """Команда внутри `find ... -exec CMD {} ;` (TS.md §7.2)."""
-    for i, arg in enumerate(args):
-        if arg in ("-exec", "-execdir", "--exec"):
+    """Первая команда внутри `find ... -exec CMD {} ;` (совместимость)."""
+    cmds = _find_exec_commands(args)
+    return cmds[0] if cmds else None
+
+
+def _find_exec_commands(args):
+    """ВСЕ команды `-exec/-execdir/-ok/-okdir CMD {} ;` в аргументах find.
+
+    Раньше бралась только первая, и второй `-exec rm -rf {}` после безобидного
+    первого проходил мимо правил (ревью 28.10.2026)."""
+    out = []
+    i = 0
+    while i < len(args):
+        if args[i] in ("-exec", "-execdir", "-ok", "-okdir", "--exec"):
             parts = []
-            for later in args[i + 1:]:
-                if later in (";", "+", "\\;"):
-                    break
-                parts.append(later)
-            return parts or None
-    return None
+            j = i + 1
+            while j < len(args) and args[j] not in (";", "+", "\\;"):
+                parts.append(args[j])
+                j += 1
+            if parts:
+                out.append(parts)
+            i = j + 1
+        else:
+            i += 1
+    return out
 
 
 # Прямые файловые утилиты в `-exec`: к ним можно дописать корни поиска как

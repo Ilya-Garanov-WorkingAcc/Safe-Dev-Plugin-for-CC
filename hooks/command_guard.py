@@ -475,7 +475,12 @@ def decide(matches, session_id, agent_id):
 # Команды, выводящие данные в сеть. В «запятнанной» инъекцией сессии каждая
 # такая команда с НЕлокальным адресом уходит в ask.
 _EGRESS_ARGV0 = {"curl", "wget", "nc", "ncat", "socat", "scp", "sftp", "ssh",
-                 "rsync", "ftp", "telnet", "http", "httpie"}
+                 "rsync", "ftp", "telnet", "http", "httpie", "autossh",
+                 "openssl", "dig", "nslookup", "host", "drill", "kdig"}
+# Инструменты, у которых первый позиционный операнд — сам хост (однословный тоже:
+# `ssh evilhost`, `nc evilhost 4444`). Для них ловим и hostname без точки.
+_HOST_FIRST = {"ssh", "sftp", "telnet", "ftp", "nc", "ncat", "autossh",
+               "dig", "nslookup", "host", "drill", "kdig"}
 # scp/rsync: голый аргумент — локальный файл, удалённая цель только через `:`
 # или `user@`. Для остальных голый домен/IP — это адрес.
 _BARE_EXCLUDE = {"scp", "rsync"}
@@ -507,6 +512,20 @@ _SOCAT_PROXY_RE = re.compile(r"^(?:SOCKS|PROXY)", re.I)
 # Петлевой адрес — только ПОЛНЫЙ: `127.0.0.1.evil.com` и `127.evil.com` — НЕ
 # loopback (подделка через поддомен).
 _LOOPBACK4_RE = re.compile(r"^127(?:\.\d{1,3}){3}$")
+# Целочисленный IP (обход): `2130706433` (=127.0.0.1), `0x7f000001`. Декодируем в
+# точечный и проверяем loopback. Малые числа (<2^24) — обычно порт/аргумент.
+_DECIMAL_IP_RE = re.compile(r"^(\d{8,10})(?:[:/?]|$)")
+_HEX_IP_RE = re.compile(r"^0x([0-9a-f]{1,8})(?:[:/?]|$)", re.I)
+# Однословный хост как ПРЕФИКС токена: минимум одна буква (чтобы не ловить порт).
+_LABEL_RE = re.compile(r"^(?=[a-z0-9-]*[a-z])([a-z0-9][a-z0-9-]{0,62})(?:[:/?]|$)", re.I)
+# FQDN/IP где-то ВНУТРИ токена (туннель `-L 80:evil.com:80`, `ProxyCommand=…`,
+# `--connect-to a:80:evil.com:80`). Lookbehind `(?<![\w.@-])` держит поиск
+# линейным: старт только на границе токена (ревью 28.10.2026).
+_EMBED_HOST_RE = re.compile(
+    r"(?<![\w.@-])((?:[a-z0-9_-]+\.)+(?:[a-z]{2,}|xn--[a-z0-9-]+)"
+    r"|\d{1,3}(?:\.\d{1,3}){3})(?![\w-])", re.I)
+# Сетевой псевдо-файл bash: `>/dev/tcp/host/port`, `</dev/udp/host/port`.
+_DEV_NET_RE = re.compile(r"/dev/(?:tcp|udp)/([^/\s]+)/", re.I)
 
 
 def _is_loopback(host):
@@ -514,12 +533,22 @@ def _is_loopback(host):
     return host in ("localhost", "::1") or bool(_LOOPBACK4_RE.match(host))
 
 
-def _egress_host(tok, tool):
+def _int_to_ip(value):
+    """32-битное число → точечный IP, иначе None."""
+    if value < 0 or value > 0xFFFFFFFF:
+        return None
+    return "{}.{}.{}.{}".format((value >> 24) & 255, (value >> 16) & 255,
+                                (value >> 8) & 255, value & 255)
+
+
+def _egress_host(tok, tool, is_first=False):
     """Нелокальный хост из одного токена, иначе None.
 
     Разбор поточечный (а не поиск по всей строке), чтобы `localhost` где-то в
     аргументах не отменял egress; при этом ловятся `host:/path`, голый домен с
-    хвостом и схема внутри флага (ревью 27.10.2026, подтверждающий проход)."""
+    хвостом и схема внутри флага (ревью 27.10.2026, подтверждающий проход).
+    `is_first` — первый позиционный операнд: только он у ssh/nc/… трактуется как
+    однословный хост (остальное — удалённая команда, ревью 28.10.2026)."""
     m = _SCHEME_RE.search(tok)
     if m:
         return m.group(1)
@@ -548,6 +577,25 @@ def _egress_host(tok, tool):
             return m.group(1)
         if _IPV6_RE.match(tok):
             return tok.strip("[]")
+        # Целочисленный IP (десятичный/hex), декодируем.
+        m = _HEX_IP_RE.match(tok)
+        if m:
+            return _int_to_ip(int(m.group(1), 16))
+        m = _DECIMAL_IP_RE.match(tok)
+        if m:
+            return _int_to_ip(int(m.group(1)))
+        # Однословный хост (`ssh evilhost`): только ПЕРВЫЙ операнд и только у
+        # инструментов, где первый операнд — это хост (иначе удалённая команда
+        # `ssh host uptime` ловилась бы как хост).
+        if is_first and tool in _HOST_FIRST:
+            m = _LABEL_RE.match(tok)
+            if m:
+                return m.group(1)
+        # Хост, вшитый в середину токена (туннель/прокси/connect-to). Последний
+        # резерв; НЕ для scp/rsync (их голые токены — локальные файлы).
+        for m in _EMBED_HOST_RE.finditer(tok):
+            if not _is_loopback(m.group(1)):
+                return m.group(1)
     return None
 
 
@@ -562,14 +610,21 @@ def _tainted_egress(data, command):
         cmds, _ = cmdparse.parse(command)
     except Exception:
         return False
+    # Сетевой псевдо-файл bash (`>/dev/tcp/host/port`) — egress без утилиты.
+    for m in _DEV_NET_RE.finditer(command):
+        if not _is_loopback(m.group(1)):
+            return True
     for cmd in cmds:
         if cmd.argv0 not in _EGRESS_ARGV0:
             continue
+        first_seen = False
         for tok in cmd.args:
             # Флаг-опция — не адрес (кроме случая, когда в ней есть схема/`@`).
             if tok.startswith("-") and "://" not in tok and "@" not in tok:
                 continue
-            host = _egress_host(tok, cmd.argv0)
+            is_first = not first_seen
+            first_seen = True
+            host = _egress_host(tok, cmd.argv0, is_first)
             if host and not _is_loopback(host):
                 return True
     return False

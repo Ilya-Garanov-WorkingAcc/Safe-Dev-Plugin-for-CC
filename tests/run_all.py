@@ -39,7 +39,8 @@ def batteries():
               os.path.join(ROOT, "tests", "test_trust_inj_p4.py"),
               os.path.join(ROOT, "tests", "test_integrity_p5.py"),
               os.path.join(ROOT, "tests", "test_fixes_2026_10.py"),
-              os.path.join(ROOT, "tests", "test_review_2026_10.py")]
+              os.path.join(ROOT, "tests", "test_review_2026_10.py"),
+              os.path.join(ROOT, "tests", "test_hardening_2026_10.py")]
     return found
 
 
