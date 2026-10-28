@@ -212,6 +212,29 @@ for label, c in [
 check("H3 sed без -i не блок", not blocked(bash("sed -e s/a/b/ notes.txt")))
 check("H3 find echo в cwd не блок", not blocked(bash(r"find . -exec echo {} \;")))
 
+print("=== H7: маскирование — whitelist не пропускает высокоэнтропийный секрет ===")
+for label in [
+        "SECRET=config.A1B2C3D4E5F6G7H8",
+        "SECRET=config.deadbeefcafe1234567890",
+        "SECRET=config.PRODKEYVALUE",
+        "PASSWORD=this.XK29PLM47QRS83TV",
+        "SECRET=params.SUPERSECRET123VALUE",
+        "SECRET=app.ABC123DEF456GHI789",
+        "SECRET=/var/Zk3q9Xy7Lm2Pw8Qr5Tv",
+        "SECRET=/tmp/A1B2C3D4E5F6G7H8J9",
+        "SECRET=/home/wJalrXUtnFEMIK7MDENGb",
+        "SECRET=/run/supersecrettoken123456"]:
+    check("H7 редактится (секрет): {}".format(label), redacted(label), label)
+# Контроль: легитимные код-референсы и пути по-прежнему НЕ редактятся.
+for label in [
+        "PASSWORD=self.password",
+        "API_KEY=config.database_url",
+        "API_KEY=config.DATABASE_URL",
+        "SECRET_FILE=/etc/ssl/private",
+        "PWD=/home/igaranov",
+        "API_KEY=request.headers"]:
+    check("H7 не редактится (код/путь): {}".format(label), not redacted(label), label)
+
 print("=== H6: правки по подтверждающему ревью ===")
 # H6.1 — node -e require('fs') без delete-метода НЕ должен давать ask.
 for label, c in [

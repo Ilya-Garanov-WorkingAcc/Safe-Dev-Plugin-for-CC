@@ -58,6 +58,28 @@ _KEYWORD_VALUE_RE = re.compile(
     r"env\.(?-i:[a-z_][a-z0-9_]*|[A-Z_][A-Z0-9_]*)|\[redacted:[^\]]*\])$", re.I)
 
 
+_ALNUM_RUN_RE = re.compile(r"[A-Za-z0-9]+")
+
+
+def _looks_secret(value):
+    """Значение содержит токен, похожий на СЕКРЕТ (высокая энтропия)?
+
+    Вето поверх whitelist (ревью 28.10.2026): ветки «путь» и «ссылка на код»
+    пропускали `config.A1B2C3…`, `/var/Zk3q9…` — настоящий секрет нужной формы.
+    Легитимные идентификаторы/пути такого токена не содержат: `database_url`,
+    `SECRET_KEY`, `/home/user` разбиваются `_`/`.`/`/` на короткие сегменты.
+    Сомнение трактуется в пользу редактирования (инвариант TS.md §1.4).
+    """
+    for run in _ALNUM_RUN_RE.findall(value):
+        if len(run) >= 16:
+            return True                          # длинный alnum-блоб
+        if len(run) >= 10 and sum(c.isdigit() for c in run) >= 2:
+            return True                          # смесь букв и цифр подлиннее
+        if len(run) >= 11 and run.isupper():
+            return True                          # длинная ПРОПИСНАЯ без разделителя
+    return False
+
+
 def rules():
     return ruleset.load("secrets")
 
@@ -90,7 +112,8 @@ def redact(text):
                 return m.group(0)
             if "REDACTED" in val:        # значение уже вычищено ранее — пропускаем
                 return m.group(0)
-            if _name == "ENV_SECRET" and _KEYWORD_VALUE_RE.match(val.strip()):
+            if (_name == "ENV_SECRET" and _KEYWORD_VALUE_RE.match(val.strip())
+                    and not _looks_secret(val)):
                 return m.group(0)            # тип/литерал/плейсхолдер, не секрет
             findings.append((_name, mask(val)))
             ph = PLACEHOLDER.format(_name)
