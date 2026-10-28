@@ -103,17 +103,30 @@ def _match_bash(command, cwd):
         writers = ruleset.bash_writers(rule)
         for cmd in cmds:
             base = cmdparse.effective_cwd(cmd, cwd) or cwd
+            # Чтение файла через редирект (`< f`, `N< f`) — это чтение цели
+            # ЛЮБОЙ командой, даже не из readers: `tee c < id_rsa`, `tr < id_rsa`,
+            # `cat 3< id_rsa`, `{ …; } < id_rsa` (ревью 27.10.2026). Дублирование
+            # (`2>&1`), here-doc и here-string в read_redirects не входят (FP-3).
+            if cmd.read_redirects:
+                hit = _bash_hit(rule, list(cmd.read_redirects), base, "read")
+                if hit:
+                    return rule, hit
             if readers and cmd.argv0 in readers:
-                candidates = list(cmd.operands) + _at_values(cmd) + list(cmd.redirects)
+                # Операнды-источники читают только известные readers (`cat f`),
+                # иначе `rm f` считалось бы чтением.
+                candidates = list(cmd.operands) + _at_values(cmd)
                 hit = _bash_hit(rule, candidates, base, "read")
                 if hit:
                     return rule, hit
             if writers and cmd.argv0 in writers:
-                hit = _bash_hit(rule, cmd.operands, base, "write")
+                # Только операнды, в которые идёт запись: источник `cp`/`mv` и
+                # `sed` без -i читают, а не пишут (FP-2).
+                hit = _bash_hit(rule, cmdparse.write_targets(cmd), base, "write")
                 if hit:
                     return rule, hit
             if rule["match"].get("write_tools"):
-                hit = _bash_hit(rule, cmd.redirects, base, "write")
+                # Только цели записи-редиректа (`> f`, `>> f`), не `2>&1`/`< f`.
+                hit = _bash_hit(rule, cmd.write_redirects, base, "write")
                 if hit:
                     return rule, hit
     return None, None

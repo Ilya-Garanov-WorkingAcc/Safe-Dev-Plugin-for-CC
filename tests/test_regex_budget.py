@@ -113,17 +113,41 @@ def collect():
         for rule in doc.get("rules", []):
             walk(rule, "{}:{}".format(os.path.basename(path), rule.get("id", "?")))
 
-    for module in (cmdparse, injection):
+    modules = [cmdparse, injection]
+    # Хуки тоже содержат модульные выражения (egress в command_guard и др.).
+    # Импортируем по пути; main() не вызывается, побочных эффектов при импорте
+    # нет. ReDoS в хуке так же опасен, как в правиле (ревью 27.10.2026).
+    import importlib.util
+    for path in sorted(glob.glob(os.path.join(ROOT, "hooks", "*.py"))):
+        if path.endswith(".tests.py"):
+            continue
+        name = "hook_" + os.path.basename(path)[:-3]
+        try:
+            spec = importlib.util.spec_from_file_location(name, path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            modules.append(mod)
+        except Exception:
+            continue
+    for module in modules:
+        mod_name = getattr(module, "__name__", "hook")
         for name in dir(module):
             value = getattr(module, name)
             if isinstance(value, re.Pattern):
-                out.append(("{}.{}".format(module.__name__, name), value))
+                out.append(("{}.{}".format(mod_name, name), value))
     return out
 
 
 print("=== A: каждое выражение на враждебном вводе ({} КБ) ===".format(SIZE // 1000))
 patterns = collect()
 check("выражения найдены", len(patterns) > 40, str(len(patterns)))
+# Хуки должны реально попадать в выборку: если импорт хука молча упадёт
+# (except continue в collect), его выражения исчезнут из CI без сигнала.
+# Якорная проверка — egress-регэксп command_guard присутствует (ревью 28.10).
+_names = [n for n, _ in patterns]
+check("покрыты регэкспы хуков (command_guard._SCHEME_RE)",
+      any(n.endswith("command_guard._SCHEME_RE") for n in _names),
+      "нет паттернов хука в выборке")
 def slow_input(rx):
     """Метка строки, на которой выражение не уложилось в LIMIT_S, либо None.
 

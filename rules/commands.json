@@ -195,7 +195,7 @@
       "match": {
         "kind": "command",
         "argv0": ["tee", "sed", "cp", "mv", "install", "truncate", "ln", "dd", "patch"],
-        "target_glob": ["**/.bashrc", "**/.bash_profile", "**/.zshrc",
+        "write_target_glob": ["**/.bashrc", "**/.bash_profile", "**/.zshrc",
                         "**/.zprofile", "**/.profile", "**/.bash_aliases",
                         "**/.envrc", "**/.zshenv", "/etc/profile.d/**"]
       },
@@ -605,7 +605,7 @@
       "match": {
         "kind": "command",
         "argv0": ["git"],
-        "args_regex_any": ["(?:^| )reflog\\b.*\\bexpire\\b", "(?:^| )gc\\b.*--prune", "(?:^| )update-ref\\b.*(?:^| )-d\\b", "(?:^| )stash\\b.*(?:^| )(?:drop|clear)\\b", "(?:^| )branch\\b.*(?:^| )(?:-f|--force)\\b", "(?:^| )tag\\b.*(?:^| )(?:-d|--delete)\\b", "(?:^| )(?:prune)\\b"]
+        "git_regex_any": ["^reflog\\b.*\\bexpire\\b", "^gc\\b.*--prune", "^update-ref\\b.*(?:^| )-d\\b", "^stash\\b.*(?:^| )(?:drop|clear)\\b", "^branch\\b.*(?:^| )(?:-f|--force)\\b", "^tag\\b.*(?:^| )(?:-d|--delete)\\b", "^prune\\b"]
       },
       "message": "Стирание истории или ссылок git: reflog expire, gc --prune, update-ref -d, stash drop/clear, перемещение ветки силой.",
       "remediation": "Эти операции необратимо удаляют объекты. Если нужно освободить место или убрать ветку — согласуйте и выполните вне агента.",
@@ -618,7 +618,7 @@
       "match": {
         "kind": "command",
         "argv0": ["git"],
-        "args_regex_any": ["(?:^| )-c\\s+\\S*(?:core\\.(?:fsmonitor|hookspath|sshcommand|pager|editor)|alias\\.\\S+=\\s*!|\\S+\\.\\S*textconv)", "(?:^| )(?:--upload-pack|--receive-pack|--exec)=", "ext::", "(?:^| )config\\b.*(?:core\\.(?:fsmonitor|hookspath|sshcommand)|alias\\.\\S+\\s+!)"]
+        "args_regex_any": ["(?:^| )-c\\s+\\S*(?:core\\.(?:fsmonitor|hookspath|sshcommand)|alias\\.\\S+=\\s*!|\\S+\\.\\S*textconv)", "(?:^| )-c\\s+\\S*core\\.(?:pager|editor)=", "(?:^| )(?:--upload-pack|--receive-pack|--exec)=", "ext::", "(?:^| )config\\b.*(?:core\\.(?:fsmonitor|hookspath|sshcommand)|alias\\.\\S+\\s+!)"]
       },
       "message": "Запуск git с ключами, исполняющими произвольную команду (core.fsmonitor, core.hooksPath, alias с !, --upload-pack, ext::).",
       "remediation": "Эти настройки задают команды, которые git выполнит сам. Нужное поведение настраивается в репозитории человеком.",
@@ -739,7 +739,8 @@
       "match": {
         "kind": "command",
         "argv0": ["rm", "unlink", "shred", "truncate"],
-        "target_glob": ["**/.git", "**/.git/**", ".git", ".git/**"]
+        "target_glob": ["**/.git", "**/.git/**", ".git", ".git/**"],
+        "target_glob_not": ["**/.git/index.lock", ".git/index.lock", "**/.git/hooks/*.sample", ".git/hooks/*.sample", "**/.git/*.lock", ".git/*.lock"]
       },
       "message": "Удаление служебных файлов git (.git, .git/refs, .git/HEAD) — потеря истории репозитория.",
       "remediation": "Чтобы разорвать связь с git, достаточно переинициализации по отдельной процедуре; удалять .git вручную не нужно.",
@@ -851,6 +852,20 @@
       "reference": "docs/RUNBOOK.md#command-destructive"
     },
     {
+      "id": "command-chmod-recursive-outside-cwd",
+      "class": "command-destructive",
+      "severity": "MEDIUM",
+      "match": {
+        "kind": "command",
+        "argv0": ["chmod", "chown", "chgrp"],
+        "flags_all": ["--recursive"],
+        "target_outside_cwd": true
+      },
+      "message": "Рекурсивная смена прав или владельца за пределами рабочего каталога.",
+      "remediation": "Меняйте права и владельца внутри проекта; вне cwd — выполните сами в терминале.",
+      "reference": "docs/RUNBOOK.md#command-destructive"
+    },
+    {
       "id": "command-docker-mount-host",
       "class": "privilege",
       "severity": "HIGH",
@@ -896,7 +911,7 @@
       "severity": "HIGH",
       "match": {
         "kind": "command",
-        "args_regex_any": ["(?:^|[;&|]\\s*)(?:export\\s+)?(?:LD_PRELOAD|LD_LIBRARY_PATH|BASH_ENV|ENV|PROMPT_COMMAND|PYTHONSTARTUP)="]
+        "args_regex_any": ["(?:^|[;&|]\\s*)(?:export\\s+)?(?:LD_PRELOAD|BASH_ENV|ENV|PROMPT_COMMAND|PYTHONSTARTUP)="]
       },
       "message": "Установка переменной окружения, через которую выполняется произвольный код при запуске программ (LD_PRELOAD, BASH_ENV, PROMPT_COMMAND).",
       "remediation": "Нужную библиотеку подключайте флагом конкретной команды, а не глобальной переменной.",

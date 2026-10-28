@@ -243,6 +243,18 @@ def match_command(cmd, rule, ctx=None):
         if not any(re.search(p, joined) for p in rx_any):
             return False
 
+    git_rx = m.get("git_regex_any")
+    if git_rx:
+        # Матчинг по очищенному тексту git (подкоманда + опции, без значений
+        # -m/--grep/-S): слова в коммит-сообщении не срабатывают (FP-4).
+        gt = ctx.get("git_text") or ""
+        if not any(re.search(p, gt) for p in git_rx):
+            return False
+
+    git_sub = m.get("git_subcommand_any")
+    if git_sub and (ctx.get("git_subcommand") or "") not in git_sub:
+        return False
+
     origins = m.get("origin")
     if origins and cmd.origin not in origins:
         return False
@@ -257,19 +269,39 @@ def match_command(cmd, rule, ctx=None):
         return False
 
     tg = m.get("target_glob")
+    tgn = m.get("target_glob_not")
     if tg:
         # Сверяем и как написано, и как разрешилось: `~/.bashrc` и
         # `/home/user/.bashrc` — один файл, а `../../etc` виден только после
-        # раскрытия.
+        # раскрытия. Исключения (tgn) снимаются ПОТОЧЕЧНО: правило срабатывает,
+        # если есть цель, попавшая под target_glob и НЕ попавшая под исключение.
+        # Иначе `rm -rf .git .git/index.lock` обходил правило целиком — один
+        # исключённый файл снимал защиту со всего `.git` (ревью 27.10.2026).
         targets = list(cmd.operands) + list(ctx.get("expanded_operands") or ())
-        if not any(any_glob(tg, t) for t in targets):
+        if not any(any_glob(tg, t) and not (tgn and any_glob(tgn, t))
+                   for t in targets):
+            return False
+    elif tgn:
+        # tgn без target_glob: правило вето при любой попавшей под исключение цели.
+        targets = list(cmd.operands) + list(ctx.get("expanded_operands") or ())
+        if any(any_glob(tgn, t) for t in targets):
+            return False
+
+    wtg = m.get("write_target_glob")
+    if wtg:
+        # Как target_glob, но только по операндам, в которые идёт ЗАПИСЬ:
+        # источник `cp`/`mv` и `sed` без -i читают цель, а не пишут в неё (FP-2).
+        targets = list(ctx.get("write_targets") or ()) + \
+            list(ctx.get("expanded_write_targets") or ())
+        if not any(any_glob(wtg, t) for t in targets):
             return False
 
     rg = m.get("redirect_glob")
     if rg:
         # `echo evil >> ~/.bashrc` — цель не операнд, а перенаправление;
         # без этой ветки персистентный RCE через shell-конфиг не виден.
-        targets = list(cmd.redirects) + list(ctx.get("expanded_redirects") or ())
+        # Только цели записи: `2>&1`/`< f` сюда не входят (FP-3).
+        targets = list(cmd.write_redirects) + list(ctx.get("expanded_redirects") or ())
         if not any(any_glob(rg, t) for t in targets):
             return False
 

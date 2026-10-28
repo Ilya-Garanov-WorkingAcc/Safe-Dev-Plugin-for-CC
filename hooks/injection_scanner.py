@@ -28,10 +28,104 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lib import audit, config, hookio, policy                    # noqa: E402
+from lib import audit, cmdparse, config, hookio, policy          # noqa: E402
 from lib import injection as _injection                          # noqa: E402
 
 HOOK = "injection_scanner"
+
+# Инструменты, вывод которых приходит ИЗВНЕ: их содержимое может нести
+# инъекцию, которой стоит пометить сессию. Локальное чтение собственного кода
+# и документации (Read/Grep/Glob и Bash cat/head/…) инъекцией не является и
+# сессию не метит — иначе чтение примеров атак в исходниках плагина поднимало
+# taint и переводило последующие локальные команды в ask (FP-6, 26.10.2026).
+# Сам разбор (additionalContext) выполняется в любом случае — видимость важна.
+_NETWORK_ARGV0 = {"curl", "wget", "nc", "ncat", "socat", "scp", "sftp", "ssh",
+                  "rsync", "ftp", "telnet", "http", "httpie", "aria2c", "git",
+                  "pip", "npm", "gh", "glab", "kubectl", "aws", "gcloud"}
+
+
+_READ_TOOLS = {"Read", "Grep", "Glob", "NotebookRead"}
+_BASH_READERS = {"cat", "head", "tail", "less", "more", "bat", "batcat", "nl",
+                 "od", "xxd", "hexdump", "strings", "base64", "base32", "grep",
+                 "egrep", "rg", "ag", "sort", "uniq", "cut", "awk", "sed", "jq",
+                 "yq", "tac", "column", "fold", "paste", "tr", "rev", "wc"}
+
+
+def _external_source(tool, tool_input):
+    """Вывод пришёл из внешнего источника (сеть), а не из локального файла."""
+    if tool in ("WebFetch", "WebSearch") or tool.startswith("mcp__"):
+        return True
+    if tool == "Bash":
+        command = tool_input.get("command")
+        if not isinstance(command, str):
+            return False
+        try:
+            cmds, _ = cmdparse.parse(command)
+        except Exception:
+            return True                       # не разобрали — осторожно: метим
+        return any(c.argv0 in _NETWORK_ARGV0 for c in cmds)
+    return False
+
+
+def _read_targets(tool, tool_input):
+    """Пути, которые читает инструмент (для проверки «свой файл / чужой»)."""
+    if tool in _READ_TOOLS:
+        out = []
+        for field in ("file_path", "path", "notebook_path"):
+            v = tool_input.get(field)
+            if isinstance(v, str) and v:
+                out.append(v)
+        return out
+    if tool == "Bash":
+        command = tool_input.get("command")
+        if not isinstance(command, str):
+            return []
+        try:
+            cmds, _ = cmdparse.parse(command)
+        except Exception:
+            return []
+        out = []
+        for c in cmds:
+            if c.stdin_file:
+                out.append(c.stdin_file)
+            out.extend(c.read_redirects)
+            if cmdparse._basename(c.argv0) in _BASH_READERS:
+                out.extend(op for op in c.operands if not op.startswith("-"))
+        return out
+    return []
+
+
+def _taint_source(tool, tool_input, cwd):
+    """Стоит ли метить сессию при high-confidence находке.
+
+    Метим и локальное чтение НЕдоверенного файла (клонированный репозиторий,
+    скачанный README) — это тоже канал косвенной инъекции (ревью 28.10.2026).
+    НЕ метим только чтение файлов САМОГО плагина: в них формы атак лежат как
+    данные (иначе вернулся бы FP-6)."""
+    if _external_source(tool, tool_input):
+        return True
+    targets = _read_targets(tool, tool_input)
+    if not targets:
+        return False
+    try:
+        root = os.path.realpath(hookio.plugin_root())
+    except Exception:
+        return True
+
+    def _under_root(target):
+        try:
+            full = cmdparse.expand_operand(target, cwd or os.getcwd())
+        except Exception:
+            return False                      # нераскрыт → не считаем «своим»
+        return full == root or full.startswith(root + os.sep)
+
+    if tool in _READ_TOOLS:
+        # У Read/Grep/Glob поле пути однозначно: метим, если ХОТЬ одна цель вне
+        # плагина (смешанное чтение «свой+чужой» не должно спасать от taint).
+        return any(not _under_root(t) for t in targets)
+    # Bash: среди операндов бывает не-путь (шаблон grep). Чтобы не вернуть FP-6
+    # на `grep pattern <свой файл>`, НЕ метим, если хоть одна цель — свой файл.
+    return not any(_under_root(t) for t in targets)
 
 # Публичный API, на который опирается тест-батарея. Реэкспорт, а не копия:
 # единственная реализация живёт в lib/injection.py и используется ещё и
@@ -107,7 +201,7 @@ def main():
     # Высокая уверенность: помечаем сессию. Дальше command_guard проводит
     # сетевые команды и запись в чувствительные пути через ask — на случай,
     # если инъекция уже убедила модель что-то отправить (аудит 03.10.2026, I2).
-    if confidence == "high":
+    if confidence == "high" and _taint_source(tool, tool_input, data.get("cwd")):
         try:
             policy.state_set(data.get("session_id"), "injection_tainted",
                              audit.now_iso())

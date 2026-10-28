@@ -57,6 +57,7 @@ DYNAMIC_DEST_RE = re.compile(r"\$\(\)|`|\$\{?[A-Za-z_]")
 # Все они означают одно: статически неизвестно, что будет выполнено.
 ESCALATING_WARNINGS = {
     "argv0_is_variable", "argv0_from_substitution", "interpreter_exec",
+    "interpreter_fs",
     "max_depth_exceeded", "too_many_commands", "recursion_limit",
     "source_unresolved", "shell_c_unresolved", "heredoc_unresolved",
     "command_too_long", "argv0_dynamic", "ifs_split", "shell_stdin_unresolved",
@@ -86,8 +87,23 @@ def build_context(cmd, cwd):
                 if not cmdparse.is_mktemp_path(op)]
     truncated = len(cmd.operands) > MAX_EXPANDED_OPERANDS
     expanded = [cmdparse.expand_operand(_target_dir(op), base) for op in operands]
+
+    def _temp(op, exp):
+        # Путь внутри временного каталога (/tmp, /var/tmp, mktemp): работа там
+        # не считается разрушением ВНЕ cwd (FP-7). Проверку на корень/дом это НЕ
+        # отменяет — `rm ~` ловится, даже если HOME оказался под /tmp.
+        # Сверяем ТОЛЬКО по realpath (`exp`): симлинк `/tmp/lnk -> /home/...`
+        # имеет temp-подобный сырой путь, но ведёт наружу (ревью 27.10.2026).
+        return cmdparse.is_temp_path(exp)
+    # Только цели записи-редиректа: `echo x 2>&1` не пишет в файл «1» (FP-3).
     expanded_redirects = [cmdparse.expand_operand(r, base)
-                          for r in cmd.redirects[:MAX_EXPANDED_OPERANDS]]
+                          for r in cmd.write_redirects[:MAX_EXPANDED_OPERANDS]]
+    # Операнды, в которые команда ПИШЕТ (назначение cp/mv, sed -i): источник
+    # cp/mv и sed без -i читают, а не пишут (FP-2).
+    write_targets = cmdparse.write_targets(cmd)[:MAX_EXPANDED_OPERANDS]
+    expanded_write_targets = [cmdparse.expand_operand(_target_dir(t), base)
+                              for t in write_targets]
+    git_subcommand, git_text = _git_semantic(cmd)
     positional = [op for op in cmd.operands if not op.startswith("-")]
     # Назначение — последний позиционный операнд (rsync, cp, mv, tar -C — нет,
     # у tar это значение флага, см. правило по args_regex_any).
@@ -100,8 +116,12 @@ def build_context(cmd, cwd):
     return {
         "expanded_operands": expanded,
         "expanded_redirects": expanded_redirects,
+        "write_targets": list(write_targets),
+        "expanded_write_targets": expanded_write_targets,
+        "git_subcommand": git_subcommand,
+        "git_text": git_text,
         "has_operand_outside_cwd": truncated or any(
-            _outside(exp, base) for _, exp in pairs),
+            _outside(exp, base) and not _temp(raw, exp) for raw, exp in pairs),
         "has_root_target": any(_is_root_target(raw, exp, base) for raw, exp in pairs),
         "exempt_targets": _exempt_targets(pairs, base, truncated),
         "operand_dynamic": not cwd_known and any(
@@ -110,7 +130,8 @@ def build_context(cmd, cwd):
         "branch_protected": _branch_protected(cmd, cwd),
         "dest": dest or "",
         "dest_root": bool(dest) and _is_root_target(dest, dest_expanded, base),
-        "dest_outside_cwd": bool(dest) and _outside(dest_expanded, base),
+        "dest_outside_cwd": bool(dest) and _outside(dest_expanded, base)
+        and not _temp(dest, dest_expanded),
         "dest_dynamic": dest is not None and (dest == "" or not cwd_known or
                                               bool(DYNAMIC_DEST_RE.search(dest))),
     }
@@ -297,6 +318,72 @@ def _is_root_target(raw, expanded, cwd):
     return here != expanded and here.startswith(expanded.rstrip("/") + os.sep)
 
 
+# Значения-сообщения git (свободный текст): отбрасываются, иначе `git commit
+# -m "stash drop"` ловится как разрушительное (FP-4). Но только у подкоманд,
+# где флаг и правда несёт сообщение: у `git branch -m old new` это
+# ПЕРЕИМЕНОВАНИЕ, и съедание значения спрятало бы следующий `-f` (ревью 27.10).
+_GIT_MESSAGE_FLAGS = frozenset({"-m", "--message", "-F", "--file",
+                                "--fixup", "--squash"})
+_GIT_MESSAGE_SUBS = frozenset({"commit", "tag", "stash", "merge", "notes",
+                               "revert", "cherry-pick", "am"})
+# Значения-шаблоны поиска/формата: безопасно отбрасывать у любой подкоманды.
+_GIT_SEARCH_FLAGS = frozenset({
+    "--grep", "--author", "--committer", "-S", "-G", "--pretty", "--format",
+    "--date"})
+# Глобальные опции git со значением — их значение не подкоманда.
+_GIT_GLOBAL_VALUE_FLAGS = frozenset({
+    "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path",
+    "--super-prefix", "--config-env", "--attr-source"})
+
+
+def _git_semantic(cmd):
+    """(подкоманда git, очищенный текст аргументов).
+
+    `git_text` строится НАЧИНАЯ С ПОДКОМАНДЫ: глобальные опции (`-C dir`,
+    `--no-pager`, `-c k=v`, `-P`) и их значения отброшены, иначе `^`-якорь в
+    git-правилах не матчил `git -C . stash drop` (ревью 27.10.2026). Из
+    оставшегося выброшены значения сообщения/поиска.
+    """
+    if cmd.argv0 != "git":
+        return None, ""
+    args = list(cmd.args)
+    # 1) Найти подкоманду, пропуская глобальные опции и их значения.
+    sub, start, i = None, len(args), 0
+    while i < len(args):
+        a = args[i]
+        if not a.startswith("-"):
+            prev = args[i - 1] if i > 0 else ""
+            if prev in _GIT_GLOBAL_VALUE_FLAGS:
+                i += 1
+                continue
+            sub, start = a, i
+            break
+        i += 2 if a in _GIT_GLOBAL_VALUE_FLAGS else 1
+    if sub is None:
+        return None, ""
+    # 2) Текст от подкоманды; у message-подкоманд глушим и значения сообщений.
+    drop = _GIT_SEARCH_FLAGS
+    if sub in _GIT_MESSAGE_SUBS:
+        drop = drop | _GIT_MESSAGE_FLAGS
+    out, i = [], start
+    while i < len(args):
+        a = args[i]
+        head = a.split("=", 1)[0]
+        if a in drop:
+            i += 2                                   # флаг + отдельное значение
+            continue
+        if "=" in a and head in drop:
+            i += 1                                   # --grep=foo
+            continue
+        if (a.startswith("-") and not a.startswith("--") and len(a) > 2
+                and a[:2] in drop):
+            i += 1                                   # -mMSG, -Sfoo (склеенно)
+            continue
+        out.append(a)
+        i += 1
+    return sub, " ".join(out)
+
+
 def _branch_protected(cmd, cwd):
     """Защищена ли ветка, в которую идёт push.
 
@@ -346,7 +433,8 @@ def collect_matches(command, cmds, cwd):
                     target = ctx["dest"]
                 else:
                     target = (cmd.operands[0] if cmd.operands
-                              else (cmd.redirects[0] if cmd.redirects else cmd.argv0))
+                              else (cmd.write_redirects[0] if cmd.write_redirects
+                                    else cmd.argv0))
                 matches.append((rule, cmd, target, ctx.get("exempt_targets")))
                 break            # одного срабатывания правила достаточно
     return matches
@@ -385,10 +473,145 @@ def decide(matches, session_id, agent_id):
 
 
 # Команды, выводящие данные в сеть. В «запятнанной» инъекцией сессии каждая
-# такая команда с внешним адресом уходит в ask.
+# такая команда с НЕлокальным адресом уходит в ask.
 _EGRESS_ARGV0 = {"curl", "wget", "nc", "ncat", "socat", "scp", "sftp", "ssh",
-                 "rsync", "ftp", "telnet", "http", "httpie"}
-_EXTERNAL_RE = re.compile(r"https?://|ftp://|@[\w.-]+:|[\w.-]+\.[a-z]{2,}")
+                 "rsync", "ftp", "telnet", "http", "httpie", "autossh",
+                 "openssl", "dig", "nslookup", "host", "drill", "kdig"}
+# Инструменты, у которых первый позиционный операнд — сам хост (однословный тоже:
+# `ssh evilhost`, `nc evilhost 4444`). Для них ловим и hostname без точки.
+_HOST_FIRST = {"ssh", "sftp", "telnet", "ftp", "nc", "ncat", "autossh",
+               "dig", "nslookup", "host", "drill", "kdig"}
+# scp/rsync: голый аргумент — локальный файл, удалённая цель только через `:`
+# или `user@`. Для остальных голый домен/IP — это адрес.
+_BARE_EXCLUDE = {"scp", "rsync"}
+# scp/rsync/sftp понимают форму `host:path` и `host::module`.
+_HOSTCOLON_TOOLS = {"scp", "rsync", "sftp"}
+# Схема ищется в ЛЮБОМ месте токена (`.search`): `--url=http://evil.com`,
+# `-ohttp://…` тоже содержат адрес (ревью 27.10.2026, подтверждающий проход).
+# Длина схемы ОГРАНИЧЕНА ({0,19}): без этого `.search` по длинному токену без
+# `://` давал катастрофический бэктрекинг (ReDoS, ~7s на 60 КБ).
+_SCHEME_RE = re.compile(
+    r"[a-z][a-z0-9+.\-]{0,19}://(?:[^/@\s]*@)?(\[[^\]\s]+\]|[^/:\s]+)", re.I)
+_USERHOST_RE = re.compile(r"^[^@/\s]+@(\[[^\]\s]+\]|[^:/\s]+)")
+# `host:` / `host:/path` / `host::module` — удалённая цель scp/rsync/sftp.
+# Лукахед не отбрасываем: `host:/abs/path` — самая частая форма.
+_HOSTCOLON_RE = re.compile(r"^(\[[^\]\s]+\]|[A-Za-z0-9.\-]+)::?")
+# Голый домен/IP как ПРЕФИКС токена: за ним может идти `/path`, `:port`, `?query`
+# или завершающая точка FQDN. TLD — ASCII, punycode (`xn--…`) или IDN (не-ASCII,
+# `пример.рф`) — ревью 28.10.2026.
+_BARE_DOMAIN_RE = re.compile(
+    r"^((?:[\w-]+\.)+(?:[a-z]{2,}|xn--[a-z0-9-]+|[^\x00-\x7f.:/?@\s]{2,})"
+    r"|\d{1,3}(?:\.\d{1,3}){3})\.?(?:[:/?]|$)", re.I)
+_IPV6_RE = re.compile(r"^\[?(?:[0-9a-f]{0,4}:){2,}[0-9a-f]{0,4}\]?", re.I)
+# socat: тип-сеть перед host (TCP/UDP/SSL/OPENSSL/SOCKS/PROXY/SCTP/DCCP, в т. ч.
+# `*-CONNECT`, `*-SENDTO`): host — второе поле `TYPE:host:port`.
+_SOCAT_TYPE_RE = re.compile(r"^(?:TCP|UDP|SSL|OPENSSL|SOCKS|PROXY|SCTP|DCCP)", re.I)
+# socat-типы, где host-НАЗНАЧЕНИЕ — третье поле (через SOCKS/HTTP-прокси):
+# `SOCKS4:proxy:target:port`. Прокси может быть loopback (Tor), цель — нет.
+_SOCAT_PROXY_RE = re.compile(r"^(?:SOCKS|PROXY)", re.I)
+# Петлевой адрес — только ПОЛНЫЙ: `127.0.0.1.evil.com` и `127.evil.com` — НЕ
+# loopback (подделка через поддомен).
+_LOOPBACK4_RE = re.compile(r"^127(?:\.\d{1,3}){3}$")
+# Целочисленный IP (обход): `2130706433` (=127.0.0.1), `0x7f000001`. Декодируем в
+# точечный и проверяем loopback. Малые числа (<2^24) — обычно порт/аргумент.
+_DECIMAL_IP_RE = re.compile(r"^(\d{8,10})(?:[:/?]|$)")
+_HEX_IP_RE = re.compile(r"^0x([0-9a-f]{1,8})(?:[:/?]|$)", re.I)
+# Однословный хост как ПРЕФИКС токена: минимум одна буква (чтобы не ловить порт).
+_LABEL_RE = re.compile(r"^(?=[a-z0-9-]*[a-z])([a-z0-9][a-z0-9-]{0,62})(?:[:/?]|$)", re.I)
+# FQDN/IP где-то ВНУТРИ токена (туннель `-L 80:evil.com:80`, `ProxyCommand=…`,
+# `--connect-to a:80:evil.com:80`). Lookbehind `(?<![\w.@-])` держит поиск
+# линейным: старт только на границе токена (ревью 28.10.2026).
+_EMBED_HOST_RE = re.compile(
+    r"(?<![\w.@-])((?:[a-z0-9_-]+\.)+(?:[a-z]{2,}|xn--[a-z0-9-]+)"
+    r"|\d{1,3}(?:\.\d{1,3}){3})(?![\w-])", re.I)
+# Сетевой псевдо-файл bash: `>/dev/tcp/host/port`, `</dev/udp/host/port`.
+_DEV_NET_RE = re.compile(r"/dev/(?:tcp|udp)/([^/\s]+)/", re.I)
+# Флаги со значением у инструментов соединения: их значение НЕ позиционный
+# хост, его надо пропускать при выборе «первого операнда» (иначе `ssh -i key
+# localhost` ловит `key` как хост, а `ssh -p 22 evilhost` теряет `evilhost`).
+_EGRESS_VALUE_FLAGS = {
+    "ssh": cmdparse.SSH_VALUE_FLAGS, "autossh": cmdparse.SSH_VALUE_FLAGS | {"-M"},
+    "scp": {"-i", "-F", "-l", "-o", "-c", "-P", "-S", "-J", "-D"},
+    "sftp": {"-i", "-F", "-l", "-o", "-c", "-P", "-S", "-J", "-D", "-b", "-B", "-R"},
+    "nc": {"-w", "-e", "-s", "-p", "-X", "-x", "-i", "-q", "-b", "-g", "-G",
+           "-O", "-I", "-T", "-c", "-o"},
+    "ncat": {"-w", "-e", "-s", "-p", "-X", "-x", "-i", "-g", "-G", "-c", "-o",
+             "--proxy", "--proxy-type"},
+    "telnet": {"-b", "-l", "-n", "-e"},
+}
+# openssl: адрес только в значении этих флагов (не в любом `file.pem`-операнде).
+_OPENSSL_HOST_FLAGS = ("-connect", "-servername", "-proxy", "-host")
+
+
+def _is_loopback(host):
+    host = host.strip("[]").lower()
+    return host in ("localhost", "::1") or bool(_LOOPBACK4_RE.match(host))
+
+
+def _int_to_ip(value):
+    """32-битное число → точечный IP, иначе None."""
+    if value < 0 or value > 0xFFFFFFFF:
+        return None
+    return "{}.{}.{}.{}".format((value >> 24) & 255, (value >> 16) & 255,
+                                (value >> 8) & 255, value & 255)
+
+
+def _egress_host(tok, tool, is_first=False):
+    """Нелокальный хост из одного токена, иначе None.
+
+    Разбор поточечный (а не поиск по всей строке), чтобы `localhost` где-то в
+    аргументах не отменял egress; при этом ловятся `host:/path`, голый домен с
+    хвостом и схема внутри флага (ревью 27.10.2026, подтверждающий проход).
+    `is_first` — первый позиционный операнд: только он у ssh/nc/… трактуется как
+    однословный хост (остальное — удалённая команда, ревью 28.10.2026)."""
+    m = _SCHEME_RE.search(tok)
+    if m:
+        return m.group(1)
+    m = _USERHOST_RE.match(tok)
+    if m:
+        return m.group(1)
+    if tool == "socat":
+        parts = tok.split(":")
+        if len(parts) >= 3 and _SOCAT_TYPE_RE.match(parts[0]):
+            # Через SOCKS/HTTP-прокси цель — в 3-м поле; прокси (2-е) бывает
+            # loopback (Tor). Возвращаем первый НЕлокальный из кандидатов.
+            cands = [parts[1]]
+            if _SOCAT_PROXY_RE.match(parts[0]) and len(parts) >= 4:
+                cands.append(parts[2])
+            for host in cands:
+                if host and not _is_loopback(host):
+                    return host
+            return parts[1]
+    if tool in _HOSTCOLON_TOOLS:
+        m = _HOSTCOLON_RE.match(tok)
+        if m:
+            return m.group(1)
+    if tool not in _BARE_EXCLUDE:
+        m = _BARE_DOMAIN_RE.match(tok)
+        if m:
+            return m.group(1)
+        if _IPV6_RE.match(tok):
+            return tok.strip("[]")
+        # Целочисленный IP (десятичный/hex), декодируем.
+        m = _HEX_IP_RE.match(tok)
+        if m:
+            return _int_to_ip(int(m.group(1), 16))
+        m = _DECIMAL_IP_RE.match(tok)
+        if m:
+            return _int_to_ip(int(m.group(1)))
+        # Однословный хост (`ssh evilhost`): только ПЕРВЫЙ операнд и только у
+        # инструментов, где первый операнд — это хост (иначе удалённая команда
+        # `ssh host uptime` ловилась бы как хост).
+        if is_first and tool in _HOST_FIRST:
+            m = _LABEL_RE.match(tok)
+            if m:
+                return m.group(1)
+        # Хост, вшитый в середину токена (туннель/прокси/connect-to). Последний
+        # резерв; НЕ для scp/rsync (их голые токены — локальные файлы).
+        for m in _EMBED_HOST_RE.finditer(tok):
+            if not _is_loopback(m.group(1)):
+                return m.group(1)
+    return None
 
 
 def _tainted_egress(data, command):
@@ -402,10 +625,43 @@ def _tainted_egress(data, command):
         cmds, _ = cmdparse.parse(command)
     except Exception:
         return False
+    # Сетевой псевдо-файл bash (`>/dev/tcp/host/port`) — egress без утилиты.
+    for m in _DEV_NET_RE.finditer(command):
+        if not _is_loopback(m.group(1)):
+            return True
     for cmd in cmds:
-        if cmd.argv0 in _EGRESS_ARGV0:
-            joined = " ".join(cmd.args)
-            if _EXTERNAL_RE.search(joined) and "localhost" not in joined:
+        if cmd.argv0 not in _EGRESS_ARGV0:
+            continue
+        if cmd.argv0 == "openssl":
+            # Адрес только в значении -connect/-servername/-proxy, а не в любом
+            # файловом операнде (`-out k.pem`), иначе ложный ask (ревью 28.10).
+            value = cmdparse._flag_value(cmd.args, _OPENSSL_HOST_FLAGS)
+            if value:
+                host = _egress_host(value, "nc", True)
+                if host and not _is_loopback(host):
+                    return True
+            continue
+        value_flags = _EGRESS_VALUE_FLAGS.get(cmd.argv0, frozenset())
+        first_seen = pending_value = False
+        for tok in cmd.args:
+            if pending_value:
+                # Значение value-флага НЕ однословный хост (`-i key`, `-p 22`),
+                # но внутри него всё ещё ищем адрес (`-L 80:evil.com:80`,
+                # `-o ProxyCommand=…`). Слот «первого операнда» не расходуется.
+                pending_value = False
+                host = _egress_host(tok, cmd.argv0, False)
+                if host and not _is_loopback(host):
+                    return True
+                continue
+            # Флаг-опция — не адрес (кроме случая, когда в ней есть схема/`@`).
+            if tok.startswith("-") and "://" not in tok and "@" not in tok:
+                if tok in value_flags and "=" not in tok:
+                    pending_value = True
+                continue
+            is_first = not first_seen
+            first_seen = True
+            host = _egress_host(tok, cmd.argv0, is_first)
+            if host and not _is_loopback(host):
                 return True
     return False
 
@@ -434,6 +690,12 @@ def _ask_unparsed(data, command, why):
         hookio.ask("PreToolUse",
                    "secure-dev: команда слишком длинная для надёжной проверки. "
                    "Подтвердите, если она ожидаема, либо разбейте её на части.")
+    if why == "interpreter_fs":
+        hookio.ask("PreToolUse",
+                   "secure-dev: код интерпретатора (python/perl/node/ruby -c/-e) "
+                   "удаляет или очищает файлы напрямую, минуя rm. Путь-цель из "
+                   "чужого языка статически не проверить. Подтвердите, если это "
+                   "ожидаемо, либо выполните удаление через rm/Bash.")
     hookio.ask("PreToolUse",
                "secure-dev: команда собирается динамически, статически "
                "проверить её невозможно. Подтвердите, если она ожидаема.")
@@ -458,8 +720,9 @@ def main():
     if len(command) > MAX_COMMAND_BYTES:
         _ask_unparsed(data, command, "command_too_long")
 
-    if _tainted_egress(data, command):
-        _ask_tainted(data, command)
+    # Egress в запятнанной сессии оценивается, но решение принимается ПОСЛЕ
+    # правил: deny правила не должен подменяться на ask (ревью 27.10.2026).
+    egress = _tainted_egress(data, command)
 
     cmds, warnings = cmdparse.parse(command)
     # Предупреждения парсера из файлов скриптов не эскалируются: в любом
@@ -520,6 +783,10 @@ def main():
                  or best["exempt"] is not None else best["decision"])
     if unresolved and effective in (policy.LOG, policy.WARN):
         _ask_unparsed(data, command, unresolved[0])
+
+    # Egress-ask не перебивает deny правила, но escalates всё менее строгое.
+    if egress and effective != policy.DENY:
+        _ask_tainted(data, command)
 
     if best is None or best["exempt"] is not None or best["suppressed"]:
         hookio.passthrough()

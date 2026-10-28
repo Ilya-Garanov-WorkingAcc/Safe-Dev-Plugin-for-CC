@@ -163,7 +163,9 @@ VALUE_FLAGS = {
     "ssh": {"-i", "-p", "-o", "-l"},
     "tar": {"-f", "--file", "-C"},
     "grep": {"-e", "-f", "--include", "--exclude"},
-    "sed": {"-e", "-f", "-i"},
+    "sed": {"-e", "-f"},                 # -i НЕ берёт отдельный аргумент: суффикс
+    #                                      присоединён (`-i.bak`), иначе `sed -e …
+    #                                      -i FILE` съедал бы FILE (ревью 28.10.2026)
     "awk": {"-v", "-f"},
     "docker": {"-e", "-v", "--name", "-p", "--env", "--volume"},
     "openssl": {"-in", "-out", "-k", "-K", "-iv"},
@@ -191,6 +193,71 @@ INTERPRETER_EXEC_RE = re.compile(
     r"IO\.popen|Kernel\.system|shell_exec|passthru|popen\s*\(",
     re.IGNORECASE)
 STRING_LITERAL_RE = re.compile(r"'([^'\n]{2,400})'|\"([^\"\n]{2,400})\"")
+
+# Разрушение файловой системы нативными вызовами интерпретатора — удаление,
+# очистка, переименование (перенос с перезаписью). Полный обход блока
+# command-destructive одной строкой `python3 -c …` был классом инцидента
+# 18.09.2026, но исполнялся на Python (G1, 26.10.2026). Имена методов в этих
+# языках регистрозависимы, но смешанный поиск безопаснее (fail-closed → ask).
+INTERPRETER_FS_RE = re.compile(
+    # Python: shutil, os, pathlib
+    r"shutil\.rmtree|shutil\.move|"
+    r"os\.remove\b|os\.removedirs|os\.unlink|os\.rmdir|os\.truncate|"
+    r"os\.rename|os\.replace|"
+    # Perl: File::Path, встроенные unlink/rmdir
+    r"remove_tree|rmtree|"
+    # Node: fs.*
+    r"fs\.rm\b|fs\.rmSync|fs\.unlink|fs\.rmdir|fs\.truncate|rmSync\s*\(|"
+    r"unlinkSync|rmdirSync|"
+    # Ruby: FileUtils, File, Dir
+    r"FileUtils\.(?:rm|remove)|File\.(?:delete|unlink)|remove_entry|Dir\.rmdir|"
+    # pathlib Path(...).unlink()/.rmdir(); perl/ruby unlink/rmdir/truncate
+    r"\.unlink\s*\(|\.rmdir\s*\(|"
+    r"\bunlink\b|\brmdir\s*\(|\btruncate\s*\(|"
+    # Обфускация доступа к ФС-методам (ревью 28.10.2026). Срабатывает только на
+    # коде интерпретатора (-c/-e/-r) и ведёт к ask, поэтому допустимо строго.
+    r"from\s+os\s+import\b[^\n]{0,200}\b(?:remove|unlink|rmdir|removedirs|truncate)\b|"
+    r"from\s+shutil\s+import\b[^\n]{0,200}\b(?:rmtree|move)\b|"
+    r"import\s+os\s+as\s+(\w{1,20})\b[\s\S]{0,300}?\b\1\.(?:remove|unlink|rmdir|removedirs|truncate)\b|"
+    r"__import__\s*\(\s*['\"](?:os|shutil)['\"]|"
+    # getattr — только с delete-именем 2-м аргументом (иначе ask на getattr(os,'name')).
+    r"getattr\s*\(\s*(?:os|shutil|pathlib|fs)\s*,\s*['\"](?:remove|unlink|rmtree|"
+    r"rmdir|removedirs|truncate|rm)\b|"
+    # require('fs')/('fs/promises') — ТОЛЬКО с цепочкой на delete-метод, иначе
+    # обычное чтение (`require('fs').readFileSync`) давало ложный ask (ревью 28.10).
+    r"require\s*\(\s*['\"]fs(?:/promises)?['\"]\s*\)\s*\.\s*(?:rm|rmSync|unlink|"
+    r"unlinkSync|rmdir|rmdirSync)\b|"
+    r"(?:fs\.)?promises\.(?:rm|unlink|rmdir)\b")
+
+# awk, исполняющий shell: пайп в команду (`print … | "sh"`, `"cmd" | getline`).
+# `system(...)` ловит INTERPRETER_EXEC_RE через _interpreter_code (G3).
+AWK_PIPE_RE = re.compile(r'\|\s*"|\|\s*getline')
+# sed, исполняющий shell: команда `e` (`1e cmd`, `e cmd`) и флаг `e` у s///.
+# Скрипт сначала режется на сегменты по `;{}` и переводам строк, затем в
+# каждом сегменте якорем снимается необязательный адрес — это линейно и не
+# даёт катастрофического бэктрекинга на входе из пробелов (бюджет regex).
+SED_ADDR_RE = re.compile(
+    r'^\s*(?:\d+|\$|/[^/\n]{0,200}/)?(?:,\s*(?:\d+|\$|/[^/\n]{0,200}/))?\s*')
+SED_S_EXEC_RE = re.compile(
+    r'[sy](.)(?:(?!\1)[^\n]){0,300}\1(?:(?!\1)[^\n]){0,300}\1[gpiImMwe0-9]*e')
+
+
+def _sed_executes(cmd):
+    """sed запускает shell: команда `e` или флаг `e` у s///y///."""
+    cands = list(cmd.operands)
+    for fl in ("-e", "--expression", "-i", "--in-place"):
+        v = _flag_value(cmd.args, (fl,))
+        if v:
+            cands.append(v)
+    for c in cands:
+        c = c[:1000]
+        if SED_S_EXEC_RE.search(c):
+            return True
+        for seg in re.split(r'[;{}\n]', c):
+            rest = seg[SED_ADDR_RE.match(seg).end():]
+            if rest[:1] == "e" and (len(rest) == 1 or rest[1] in " \t"):
+                return True
+    return False
 
 # Heredoc: кому достаётся тело (см. _classify_heredoc).
 HEREDOC_DATA = "data"          # текст, уходящий в файл: командами не является
@@ -248,6 +315,16 @@ class Cmd:
     upstream: tuple = ()
     downstream: tuple = ()
     redirects: tuple = ()
+    # Подмножество redirects: цели-файлы, в которые идёт ЗАПИСЬ (`>`, `>>`,
+    # `>|`, `&>`, `&>>`, `<>`). Дублирование и закрытие дескрипторов (`2>&1`,
+    # `>&2`, `3>&-`), чтение (`<`, `0<`) и here-string (`<<<`) сюда не входят:
+    # иначе `echo x 2>&1` принималось за запись в файл «1» (FP-3, 26.10.2026).
+    write_redirects: tuple = ()
+    # Подмножество redirects: цели-файлы, из которых идёт ЧТЕНИЕ (`<`, `0<`,
+    # `N<`). Нужно, чтобы `tee c < id_rsa`, `cat 3< id_rsa` и `{ …; } < id_rsa`
+    # ловились как чтение секрета независимо от команды (ревью 27.10.2026).
+    # `<<`, `<<<`, `<&` сюда не входят.
+    read_redirects: tuple = ()
     assignments: tuple = ()
     var_argv0: bool = False
     # Имя команды как написано (`./deploy/e2e-test.sh`, `/usr/bin/rm`): argv0
@@ -891,6 +968,8 @@ def _build(words, depth, origin, position, pipeline_index, state):
             cmd = Cmd(argv0=":", raw=": > " + " ".join(red["redirects"]),
                       depth=depth, origin=origin, pipeline=pipeline_index,
                       position=position, redirects=tuple(red["redirects"]),
+                      write_redirects=tuple(red["write_redirects"]),
+                      read_redirects=tuple(red["read_redirects"]),
                       assignments=tuple(assignments), argv0_text=":",
                       stdout_file=red["stdout_file"] or "",
                       stdin_file=red["stdin_file"] or "", cwd=state.get("cd"))
@@ -934,6 +1013,8 @@ def _build(words, depth, origin, position, pipeline_index, state):
     cmd = Cmd(argv0=argv0, args=args, flags=flags, operands=operands,
               depth=depth, origin=origin, raw=raw, pipeline=pipeline_index,
               position=position, redirects=tuple(red["redirects"]),
+              write_redirects=tuple(red["write_redirects"]),
+                      read_redirects=tuple(red["read_redirects"]),
               assignments=tuple(assignments), var_argv0=var_argv0,
               argv0_text=_render(head).strip().lstrip("\\"),
               here_strings=tuple(red["here_strings"]),
@@ -979,6 +1060,8 @@ def _strip_redirects(words):
     вычисляется или это /dev/stdout и подобное).
     """
     out, redirects, heredocs, here_strings, subs = [], [], [], [], []
+    write_redirects = []
+    read_redirects = []
     stdout_targets, stdout_static, stdin_file = [], True, None
     i = 0
     while i < len(words):
@@ -997,19 +1080,53 @@ def _strip_redirects(words):
             i += 1                           # оператор без цели
             continue
         i += 2
-        redirects.append(_render(target))
+        rendered = _render(target)
+        redirects.append(rendered)
         subs.extend(target.subs)
         if op.endswith("<<<"):
             here_strings.append(target.text)
         elif op in ("<", "0<"):
-            stdin_file = _render(target)
+            stdin_file = rendered
+            read_redirects.append(rendered)
+        elif _READ_REDIR_RE.match(op):               # `N<` — чтение файла в дескриптор
+            read_redirects.append(rendered)
+        elif _is_write_redirect(op, rendered):
+            write_redirects.append(rendered)
         stdout_static &= _note_stdout(op, target.text, target, stdout_targets)
     stdout_file = None
     if stdout_static and len(stdout_targets) == 1:
         stdout_file = stdout_targets[0]
     return {"words": out, "redirects": redirects, "stdout_file": stdout_file,
             "heredocs": heredocs, "here_strings": here_strings,
-            "stdin_file": stdin_file, "subs": subs}
+            "stdin_file": stdin_file, "subs": subs,
+            "write_redirects": write_redirects, "read_redirects": read_redirects}
+
+
+# `<`, `0<`, `N<` — чтение файла (но не `<<`, `<<<`, `<&`).
+_READ_REDIR_RE = re.compile(r"^\d*<$")
+
+
+_FD_DUP_TARGET_RE = re.compile(r"^\d+$")
+
+
+def _is_write_redirect(op, target=""):
+    """Оператор пишет в файл-цель `target`?
+
+    Запись: `>`, `>>`, `>|`, `&>`, `&>>`, `N>`, `<>` (открывает на запись).
+    Также `>& СЛОВО` и `N>& СЛОВО`, где СЛОВО — не дескриптор: bash перенаправит
+    stdout+stderr в ФАЙЛ (эквивалент `&>`), и без этого `echo x >& ~/.ssh/...`
+    проходил мимо проверок (ревью 27.10.2026).
+    Не запись: дублирование/закрытие дескриптора — `>&2`, `2>&1`, `N>&-`, `<&`;
+    чтение (`<`, `N<`); here-string (`<<<`).
+    """
+    if op.endswith("&"):            # `>& ЦЕЛЬ` / `N>& ЦЕЛЬ` — цель отдельным словом
+        if "<" in op and ">" not in op:          # `<&` — дублирование на чтение
+            return False
+        tgt = (target or "").strip()
+        if tgt in ("-", "") or _FD_DUP_TARGET_RE.match(tgt):
+            return False                          # дескриптор/закрытие, не файл
+        return ">" in op                          # пишем в файл (fail-closed)
+    return ">" in op
 
 
 def _note_stdout(op, target, word, targets):
@@ -1079,6 +1196,10 @@ def _interpreter_code(code, depth, state):
                        raw=code[:200]))
         for literal in _literals(code):
             out.extend(_parse_text(literal, depth + 1, INTERPRETER, state))
+    if INTERPRETER_FS_RE.search(code):
+        # Разрушение ФС нативным вызовом: статически путь-цель из чужого языка
+        # надёжно не извлечь, поэтому решение отдаётся человеку (fail-closed).
+        state["warnings"].append("interpreter_fs")
     return out
 
 
@@ -1396,15 +1517,25 @@ def _expand(cmd, args, depth, state, has_heredoc=False):
         out.extend(_parse_text(args[0], depth + 1, SUBSHELL, state))
 
     if argv0 == "find" and "--exec" in cmd.flags:
-        exec_cmd = _find_exec_command(args)
-        if exec_cmd:
-            # `{}` — цель, которую find подставляет для каждого найденного
-            # файла: статически известен только плейсхолдер (как `-I{}` у
-            # xargs), не то, что реально будет удалено. Тот же маркер `$()`,
-            # что и у обычной подстановки.
-            line = " ".join(_quote(a) for a in exec_cmd)
-            if "{}" in exec_cmd:
-                line = line.replace("{}", "{}$()")
+        # Область действия `-exec` — дерево под корнями поиска find, а не
+        # плейсхолдер `{}`. Подставляя корни вместо `{}`, получаем реальную
+        # цель: `find ~ -exec rm {} +` → `rm ~` (ловится delete-root),
+        # `find . -exec rm {} +` → `rm .` (чистка в cwd, не блокируется).
+        # Разбираются ВСЕ `-exec` (а не только первая), иначе второй `-exec rm`
+        # проходил мимо правил (ревью 28.10.2026).
+        roots = _find_search_roots(args) or ["."]
+        for exec_cmd in _find_exec_commands(args):
+            parts = []
+            for a in exec_cmd:
+                if a == "{}":
+                    parts.extend(roots)
+                else:
+                    parts.append(a)
+            if "{}" not in exec_cmd and _basename(exec_cmd[0]) in _FIND_DIRECT_TARGETS:
+                # Цель не подставлена явно: корни добавляем только прямым файловым
+                # утилитам, чтобы не портить `sh -c`.
+                parts.extend(roots)
+            line = " ".join(_quote(a) for a in parts)
             out.extend(_parse_text(line, depth + 1, cmd.origin, state))
 
     # --- утилиты, исполняющие строку с командой ---------------------------
@@ -1471,9 +1602,23 @@ def _expand(cmd, args, depth, state, has_heredoc=False):
                 state["warnings"].append("shell_stdin_unresolved")
 
     if argv0 in INTERPRETERS:
-        code = _flag_value(args, ("-c", "-e", "-E", "--eval", "--print"))
+        code_flags = ("-c", "-e", "-E", "--eval", "--print")
+        if argv0 == "php":
+            code_flags = code_flags + ("-r",)    # php исполняет код из -r
+        code = _flag_value(args, code_flags)
         if code:
             out.extend(_interpreter_code(code, depth, state))
+
+    if argv0 == "awk" and not _flag_value(args, ("-f", "--file")):
+        # Программа awk — первый позиционный операнд (при -f она в файле).
+        prog = cmd.operands[0] if cmd.operands else None
+        if prog:
+            out.extend(_interpreter_code(prog, depth, state))  # system("…")
+            if AWK_PIPE_RE.search(prog):
+                state["warnings"].append("interpreter_exec")
+
+    if argv0 == "sed" and _sed_executes(cmd):
+        state["warnings"].append("interpreter_exec")
     return out, shell_stdin
 
 
@@ -1544,16 +1689,66 @@ def _xargs_replacement(args):
 
 
 def _find_exec_command(args):
-    """Команда внутри `find ... -exec CMD {} ;` (TS.md §7.2)."""
-    for i, arg in enumerate(args):
-        if arg in ("-exec", "-execdir"):
+    """Первая команда внутри `find ... -exec CMD {} ;` (совместимость)."""
+    cmds = _find_exec_commands(args)
+    return cmds[0] if cmds else None
+
+
+def _find_exec_commands(args):
+    """ВСЕ команды `-exec/-execdir/-ok/-okdir CMD {} ;` в аргументах find.
+
+    Раньше бралась только первая, и второй `-exec rm -rf {}` после безобидного
+    первого проходил мимо правил (ревью 28.10.2026)."""
+    out = []
+    i = 0
+    while i < len(args):
+        if args[i] in ("-exec", "-execdir", "-ok", "-okdir", "--exec"):
             parts = []
-            for later in args[i + 1:]:
-                if later in (";", "+"):
-                    break
-                parts.append(later)
-            return parts or None
-    return None
+            j = i + 1
+            while j < len(args) and args[j] not in (";", "+", "\\;"):
+                parts.append(args[j])
+                j += 1
+            if parts:
+                out.append(parts)
+            i = j + 1
+        else:
+            i += 1
+    return out
+
+
+# Прямые файловые утилиты в `-exec`: к ним можно дописать корни поиска как
+# цель, даже если `{}` опущен. `sh`/`bash`/`xargs` сюда не входят — их код
+# разбирается отдельно и подстановка корней его бы исказила.
+_FIND_DIRECT_TARGETS = frozenset({
+    "rm", "rmdir", "unlink", "shred", "truncate", "mv", "cp", "chmod",
+    "chown", "dd", "tee"})
+# Глобальные опции find перед корнями поиска.
+_FIND_GLOBAL_OPTS = frozenset({"-H", "-L", "-P"})
+
+
+def _find_search_roots(args):
+    """Корни поиска find: операнды до первого предиката (`-name`, `(`, …)."""
+    roots = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in _FIND_GLOBAL_OPTS:
+            i += 1
+            continue
+        if a == "-D" or a == "-O":           # -D takes value; -O level
+            i += 2 if a == "-D" else 1
+            continue
+        if a.startswith("-O"):               # -Olevel склеенно
+            i += 1
+            continue
+        break
+    while i < len(args):
+        a = args[i]
+        if a.startswith("-") or a in ("(", ")", "!", ","):
+            break
+        roots.append(a)
+        i += 1
+    return roots
 
 
 def _unwrap(argv0, args, spec=None):
@@ -1728,6 +1923,145 @@ def is_mktemp_path(operand):
     """Операнд — путь, полученный из `$(mktemp …)` этой же строки."""
     return ((operand == MKTEMP_PATH or operand.startswith(MKTEMP_PATH + "/"))
             and ".." not in operand.split("/"))
+
+
+# Корни временных каталогов: работа внутри них (создание, удаление) — обычное
+# дело (pytest, сборка, scratchpad), а не разрушение вне cwd (FP-7). Сам корень
+# (`/tmp`) под это НЕ подпадает — только путь ВНУТРИ него.
+_TEMP_ROOTS = ("/tmp/", "/var/tmp/", "/dev/shm/", "/private/tmp/",
+               "/private/var/tmp/")
+
+
+def is_temp_path(operand):
+    """Операнд — путь внутри стандартного временного каталога."""
+    if not operand or ".." in operand.split("/"):
+        return False
+    return (is_mktemp_path(operand)
+            or any(operand.startswith(r) and len(operand) > len(r)
+                   for r in _TEMP_ROOTS))
+
+
+# Утилиты, которые пишут в ПОСЛЕДНИЙ позиционный операнд (назначение); их
+# первые операнды — источники, то есть чтение (`cp secret dst`). `mv` сюда НЕ
+# входит: он УДАЛЯЕТ источники, поэтому у него под контролем все операнды
+# (ревью 27.10.2026).
+_DEST_LAST_WRITERS = frozenset({"cp", "install", "ln"})
+# Perl/ruby-опции, забирающие остаток токена как значение: после них буквы — не
+# флаги, поэтому `-i` в `-Idir` (значение) не считается in-place-правкой.
+_PERL_VALUE_OPTS = frozenset("eImMF0SxVh")
+
+
+def write_targets(cmd):
+    """Операнды, в которые команда ЗАПИСЫВАЕТ (а не читает как источник).
+
+    Нужно, чтобы `cp ~/.ssh/id_rsa /tmp/` не считалось записью в id_rsa, а
+    `sed -n …` вообще не считалось записью (FP-2, 26.10.2026). Цели записи
+    через редирект (`> f`) сюда не входят — они в `Cmd.write_redirects`.
+    """
+    argv0 = _basename(cmd.argv0)
+    ops = [o for o in cmd.operands if not o.startswith("-")]
+    if argv0 == "sed":
+        targets = list(ops) if _sed_in_place(cmd.flags) else []
+        return targets + _sed_write_files(cmd)       # `w FILE`, `s///w FILE`
+    if argv0 == "dd":
+        return [a.split("=", 1)[1] for a in cmd.operands
+                if a.startswith("of=") and len(a) > 3]
+    if argv0 in ("perl", "ruby") and _perl_inplace(cmd.args):
+        return list(ops)                             # -i / -pi: правка на месте
+    if argv0 in ("awk", "gawk", "mawk") and _awk_inplace(cmd):
+        return list(ops)                             # gawk -i inplace
+    if argv0 == "mv":
+        # mv УДАЛЯЕТ источники и пишет назначение → под контролем все операнды.
+        tdir, _has = _target_directory(cmd.args)
+        return list(ops) + ([tdir] if tdir else [])
+    if argv0 in _DEST_LAST_WRITERS:
+        # `-t DIR` / `--target-directory=DIR`: назначение — КАТАЛОГ-значение
+        # флага, а все позиционные операнды — источники. Без этого
+        # `cp -t ~/.ssh authorized_keys` писал мимо проверок (ревью 27.10.2026).
+        tdir, has_tdir = _target_directory(cmd.args)
+        if has_tdir:
+            return [tdir] if tdir is not None else list(ops)
+        return ops[-1:] if ops else []
+    # tee/truncate/shred/patch/rm и прочие: пишут (или удаляют) свои операнды.
+    return ops
+
+
+def _perl_inplace(args):
+    """perl/ruby с `-i`/`-pi`/`-i.bak`: редактирование файла на месте.
+
+    Буквы после опции-со-значением (`-I dir`, `-e code`) — это значение, а не
+    флаги, поэтому `i` в `-Idir` не считается in-place (ревью 27.10.2026).
+    """
+    for a in args:
+        if not (a.startswith("-") and not a.startswith("--") and len(a) > 1):
+            continue
+        for ch in a[1:]:
+            if ch == "i":
+                return True
+            if ch in _PERL_VALUE_OPTS:
+                break                                # остаток токена — значение
+    return False
+
+
+def _awk_inplace(cmd):
+    """gawk -i inplace: расширение, переписывающее файлы-операнды."""
+    return "-i" in cmd.flags and "inplace" in cmd.operands
+
+
+# Команда sed `w FILE` и флаг `s///w FILE` пишут в FILE даже без -i.
+_SED_W_CMD_RE = re.compile(r"(?:^|[;{}\n])[0-9$,~!/ \t]*[wW][ \t]+([^;{}\n]+)")
+_SED_S_W_RE = re.compile(
+    r"s(/)(?:\\.|[^/\\\n])*/(?:\\.|[^/\\\n])*/[a-zA-Z0-9]*[wW][ \t]+([^;{}\n]+)")
+
+
+def _sed_write_files(cmd):
+    """Файлы-цели команд записи внутри sed-скрипта (`w f`, `s/…/…/w f`)."""
+    text = " \n ".join(cmd.args)
+    files = [m.group(1).strip() for m in _SED_W_CMD_RE.finditer(text)]
+    files += [m.group(2).strip() for m in _SED_S_W_RE.finditer(text)]
+    return [f for f in files if f]
+
+
+_TARGET_DIR_LONG = "--target-directory"
+
+
+def _target_directory(args):
+    """(каталог-назначение, есть_ли_флаг) для cp/mv/install/ln.
+
+    Распознаёт все формы GNU, которыми можно задать `-t`, иначе `cp -t~/.ssh`
+    (склейка), `cp -vt~/.ssh` (кластер) и `cp --t=~/.ssh` (сокращение) обходили
+    проверку записи (ревью 27.10.2026, 2-й проход). Не смогли выделить значение
+    — (None, True): вызывающий тогда считает целями записи ВСЕ операнды (строго).
+    """
+    for i, a in enumerate(args):
+        if a.startswith("--"):
+            name, eq, val = a.partition("=")
+            # Однозначное сокращение длинной опции: `--t`…`--target-directory`.
+            if len(name) >= 3 and _TARGET_DIR_LONG.startswith(name):
+                if eq:
+                    return (val or None), True
+                return (args[i + 1] if i + 1 < len(args) else None), True
+        elif a.startswith("-") and len(a) > 1:
+            body = a[1:]                             # короткий кластер флагов
+            pos = body.find("t")
+            if pos != -1:
+                rest = body[pos + 1:]
+                if rest:
+                    return rest, True               # склейка: -t~/.ssh, -vt~/.ssh
+                return (args[i + 1] if i + 1 < len(args) else None), True
+    return None, False
+
+
+def _sed_in_place(flags):
+    """sed пишет в файл только с -i / --in-place (в т. ч. `-i.bak`, `-ni`)."""
+    for f in flags:
+        if f.startswith("--in-place"):
+            return True
+        if f.startswith("-") and not f.startswith("--"):
+            short = f[1:].split("=", 1)[0].split(".", 1)[0]
+            if "i" in short:
+                return True
+    return False
 
 
 def outside_cwd(operand, cwd):
