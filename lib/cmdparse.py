@@ -220,9 +220,14 @@ INTERPRETER_FS_RE = re.compile(
     r"from\s+shutil\s+import\b[^\n]{0,200}\b(?:rmtree|move)\b|"
     r"import\s+os\s+as\s+(\w{1,20})\b[\s\S]{0,300}?\b\1\.(?:remove|unlink|rmdir|removedirs|truncate)\b|"
     r"__import__\s*\(\s*['\"](?:os|shutil)['\"]|"
-    r"getattr\s*\(\s*(?:os|shutil|pathlib|fs)\b|"
-    r"require\s*\(\s*['\"]fs(?:/promises)?['\"]|"
-    r"fs\.promises\b|promises\.rm\b")
+    # getattr — только с delete-именем 2-м аргументом (иначе ask на getattr(os,'name')).
+    r"getattr\s*\(\s*(?:os|shutil|pathlib|fs)\s*,\s*['\"](?:remove|unlink|rmtree|"
+    r"rmdir|removedirs|truncate|rm)\b|"
+    # require('fs')/('fs/promises') — ТОЛЬКО с цепочкой на delete-метод, иначе
+    # обычное чтение (`require('fs').readFileSync`) давало ложный ask (ревью 28.10).
+    r"require\s*\(\s*['\"]fs(?:/promises)?['\"]\s*\)\s*\.\s*(?:rm|rmSync|unlink|"
+    r"unlinkSync|rmdir|rmdirSync)\b|"
+    r"(?:fs\.)?promises\.(?:rm|unlink|rmdir)\b")
 
 # awk, исполняющий shell: пайп в команду (`print … | "sh"`, `"cmd" | getline`).
 # `system(...)` ловит INTERPRETER_EXEC_RE через _interpreter_code (G3).

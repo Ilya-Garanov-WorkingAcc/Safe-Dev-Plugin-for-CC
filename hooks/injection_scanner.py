@@ -111,14 +111,21 @@ def _taint_source(tool, tool_input, cwd):
         root = os.path.realpath(hookio.plugin_root())
     except Exception:
         return True
-    for target in targets:
+
+    def _under_root(target):
         try:
             full = cmdparse.expand_operand(target, cwd or os.getcwd())
         except Exception:
-            continue
-        if full == root or full.startswith(root + os.sep):
-            return False                      # чтение своего файла — не метим
-    return True
+            return False                      # нераскрыт → не считаем «своим»
+        return full == root or full.startswith(root + os.sep)
+
+    if tool in _READ_TOOLS:
+        # У Read/Grep/Glob поле пути однозначно: метим, если ХОТЬ одна цель вне
+        # плагина (смешанное чтение «свой+чужой» не должно спасать от taint).
+        return any(not _under_root(t) for t in targets)
+    # Bash: среди операндов бывает не-путь (шаблон grep). Чтобы не вернуть FP-6
+    # на `grep pattern <свой файл>`, НЕ метим, если хоть одна цель — свой файл.
+    return not any(_under_root(t) for t in targets)
 
 # Публичный API, на который опирается тест-батарея. Реэкспорт, а не копия:
 # единственная реализация живёт в lib/injection.py и используется ещё и

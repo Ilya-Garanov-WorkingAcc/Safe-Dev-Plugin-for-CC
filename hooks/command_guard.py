@@ -526,6 +526,21 @@ _EMBED_HOST_RE = re.compile(
     r"|\d{1,3}(?:\.\d{1,3}){3})(?![\w-])", re.I)
 # Сетевой псевдо-файл bash: `>/dev/tcp/host/port`, `</dev/udp/host/port`.
 _DEV_NET_RE = re.compile(r"/dev/(?:tcp|udp)/([^/\s]+)/", re.I)
+# Флаги со значением у инструментов соединения: их значение НЕ позиционный
+# хост, его надо пропускать при выборе «первого операнда» (иначе `ssh -i key
+# localhost` ловит `key` как хост, а `ssh -p 22 evilhost` теряет `evilhost`).
+_EGRESS_VALUE_FLAGS = {
+    "ssh": cmdparse.SSH_VALUE_FLAGS, "autossh": cmdparse.SSH_VALUE_FLAGS | {"-M"},
+    "scp": {"-i", "-F", "-l", "-o", "-c", "-P", "-S", "-J", "-D"},
+    "sftp": {"-i", "-F", "-l", "-o", "-c", "-P", "-S", "-J", "-D", "-b", "-B", "-R"},
+    "nc": {"-w", "-e", "-s", "-p", "-X", "-x", "-i", "-q", "-b", "-g", "-G",
+           "-O", "-I", "-T", "-c", "-o"},
+    "ncat": {"-w", "-e", "-s", "-p", "-X", "-x", "-i", "-g", "-G", "-c", "-o",
+             "--proxy", "--proxy-type"},
+    "telnet": {"-b", "-l", "-n", "-e"},
+}
+# openssl: адрес только в значении этих флагов (не в любом `file.pem`-операнде).
+_OPENSSL_HOST_FLAGS = ("-connect", "-servername", "-proxy", "-host")
 
 
 def _is_loopback(host):
@@ -617,10 +632,31 @@ def _tainted_egress(data, command):
     for cmd in cmds:
         if cmd.argv0 not in _EGRESS_ARGV0:
             continue
-        first_seen = False
+        if cmd.argv0 == "openssl":
+            # Адрес только в значении -connect/-servername/-proxy, а не в любом
+            # файловом операнде (`-out k.pem`), иначе ложный ask (ревью 28.10).
+            value = cmdparse._flag_value(cmd.args, _OPENSSL_HOST_FLAGS)
+            if value:
+                host = _egress_host(value, "nc", True)
+                if host and not _is_loopback(host):
+                    return True
+            continue
+        value_flags = _EGRESS_VALUE_FLAGS.get(cmd.argv0, frozenset())
+        first_seen = pending_value = False
         for tok in cmd.args:
+            if pending_value:
+                # Значение value-флага НЕ однословный хост (`-i key`, `-p 22`),
+                # но внутри него всё ещё ищем адрес (`-L 80:evil.com:80`,
+                # `-o ProxyCommand=…`). Слот «первого операнда» не расходуется.
+                pending_value = False
+                host = _egress_host(tok, cmd.argv0, False)
+                if host and not _is_loopback(host):
+                    return True
+                continue
             # Флаг-опция — не адрес (кроме случая, когда в ней есть схема/`@`).
             if tok.startswith("-") and "://" not in tok and "@" not in tok:
+                if tok in value_flags and "=" not in tok:
+                    pending_value = True
                 continue
             is_first = not first_seen
             first_seen = True

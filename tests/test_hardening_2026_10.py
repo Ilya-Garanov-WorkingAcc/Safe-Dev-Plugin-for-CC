@@ -212,6 +212,47 @@ for label, c in [
 check("H3 sed без -i не блок", not blocked(bash("sed -e s/a/b/ notes.txt")))
 check("H3 find echo в cwd не блок", not blocked(bash(r"find . -exec echo {} \;")))
 
+print("=== H6: правки по подтверждающему ревью ===")
+# H6.1 — node -e require('fs') без delete-метода НЕ должен давать ask.
+for label, c in [
+        ("node require fs readFileSync", "node -e 'require(\"fs\").readFileSync(\"a\")'"),
+        ("node fs/promises readFile",    "node -e 'require(\"fs/promises\").readFile(\"a\")'"),
+        ("getattr os name",              "python3 -c 'getattr(os, \"name\")'")]:
+    check("H6.1 не ask (обычный код): {}".format(label), not blocked(bash(c)), bash(c))
+# Контроль: delete-методы по-прежнему ask.
+for label, c in [
+        ("require fs rmSync",     "node -e 'require(\"fs\").rmSync(\"x\")'"),
+        ("fs/promises .rm",       "node -e 'require(\"fs/promises\").rm(\"x\")'"),
+        ("getattr os remove",     "python3 -c 'getattr(os, \"remove\")(\"/x\")'")]:
+    check("H6.1 ask (удаление): {}".format(label), blocked(bash(c)), bash(c))
+
+# H6.2/H6.3 — egress: value-флаги и openssl.
+_osg6 = cg.policy.state_get
+cg.policy.state_get = lambda sid, key, default=None: (
+    True if key == "injection_tainted" else _osg6(sid, key, default))
+try:
+    for label, c in [
+            ("ssh -p 22 host",   "ssh -p 22 evilhost"),
+            ("nc -w 3 host",     "nc -w 3 evilhost 80"),
+            ("ssh -o .. host",   "ssh -o StrictHostKeyChecking=no evilhost"),
+            ("openssl s_client host", "openssl s_client -connect evil.com:443"),
+            ("openssl s_client label", "openssl s_client -connect evilhost:443")]:
+        check("H6.2 egress: {}".format(label), eg(c), c)
+    for label, c in [
+            ("ssh -i key localhost", "ssh -i key localhost"),
+            ("openssl genrsa -out",  "openssl genrsa -out k.pem 2048"),
+            ("openssl x509 -in",     "openssl x509 -in cert.pem -noout")]:
+        check("H6.3 не egress (FP): {}".format(label), not eg(c), c)
+finally:
+    cg.policy.state_get = _osg6
+
+# H6.4 — смешанное чтение tool'ом (свой+чужой) метит; только свой — нет.
+OUT = os.path.join(TMP, "cloned", "x.md")
+check("H6.4 Grep чужого пути метит",
+      _scan_taints("Grep", {"pattern": "x", "path": OUT}, INJECT, "h6-a"), OUT)
+check("H6.4 Grep своего пути НЕ метит",
+      not _scan_taints("Grep", {"pattern": "x", "path": os.path.join(_hookio.plugin_root(), "lib")}, INJECT, "h6-b"), "self")
+
 shutil.rmtree(TMP, ignore_errors=True)
 print("\nSUMMARY:", "ALL PASSED" if not FAILS else "FAILED({}) {}".format(len(FAILS), FAILS))
 sys.exit(1 if FAILS else 0)
