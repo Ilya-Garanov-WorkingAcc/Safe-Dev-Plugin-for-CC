@@ -337,14 +337,14 @@ def redacted(text):
     return bool(findings) or out != text
 
 
-# НЕ секреты — не должны редактироваться.
+# НЕ секреты — не должны редактироваться (имена типов и явные плейсхолдеры).
+# Строгий whitelist (ревью 28.10.2026, вариант A) убрал shape-ветки, поэтому
+# бывшие FP-контроли TOKEN_URL/request.form/self.X/PWD/CREDENTIAL_FILE переведены
+# в блок «редактируется» ниже: структурно их не отличить от настоящего секрета
+# (см. H8 в test_hardening_2026_10.py). GIT_AUTHOR_EMAIL остаётся не-секретом
+# (AUTHOR не матчит ключ), плейсхолдеры и имена типов — тоже.
 NONSECRET = [
-    ("TOKEN_URL",          'TOKEN_URL = "https://api.example.com/v1/data"'),
-    ("password из формы",  'password = request.form["password"]'),
-    ("token = self.X",     "token = self.tokenizer"),
     ("GIT_AUTHOR_EMAIL",   "GIT_AUTHOR_EMAIL=someone@example.com"),
-    ("PWD путь",           "PWD=/home/user/project/src"),
-    ("CREDENTIAL_FILE путь", "CREDENTIAL_FILE=/etc/app/credentials.json"),
     ("плейсхолдер your-",  "SECRET_KEY=your-secret-key-here"),
     ("api_key тип",        "api_key: string"),
 ]
@@ -361,6 +361,18 @@ SECRET = [
 ]
 for label, text in SECRET:
     check("FP-1 редактируется (секрет): {}".format(label), redacted(text), text)
+
+# Строгий whitelist (ревью 28.10.2026, вариант A): бывшие FP-контроли —
+# shape-значения под секретным ключом — теперь редактятся (over-redaction).
+STRICT_A = [
+    ("TOKEN_URL",            'TOKEN_URL = "https://api.example.com/v1/data"'),
+    ("password из формы",    'password = request.form["password"]'),
+    ("token = self.X",       "token = self.tokenizer"),
+    ("PWD путь",             "PWD=/home/user/project/src"),
+    ("CREDENTIAL_FILE путь", "CREDENTIAL_FILE=/etc/app/credentials.json"),
+]
+for label, text in STRICT_A:
+    check("FP-1 строгий A редактится: {}".format(label), redacted(text), text)
 
 print("=== FP-7: удаление во временных каталогах не блокируется ===")
 for label, command in [

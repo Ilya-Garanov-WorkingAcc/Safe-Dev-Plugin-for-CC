@@ -114,13 +114,19 @@ for label in [
         "password = None",
         "secret: bool",
         "config = settings.SECRET_KEY",
-        "API_KEY=config.database_url",
-        "PWD=/home/user/project",
-        "SECRET_FILE=/etc/ssl/private",
         "url = https://example.com/path",
         "API_KEY=your-token-here",
         "PORT=8080"]:
     check("Ревью-1 код не редактится: {}".format(label), not redacted(label), label)
+# Строгий whitelist (ревью 28.10.2026, вариант A): shape-значения под секретным
+# ключом (код-референс/путь) теперь редактятся — это осознанная over-redaction,
+# т.к. структурно их не отличить от настоящего секрета (см. H8 в
+# test_hardening_2026_10.py). Прежние FP-контроли переведены в «редактится».
+for label in [
+        "API_KEY=config.database_url",
+        "PWD=/home/user/project",
+        "SECRET_FILE=/etc/ssl/private"]:
+    check("Ревью-1 строгий A редактится: {}".format(label), redacted(label), label)
 
 # Принятое ужесточение (ревью 27.10.2026): длинное число под секретным ключом
 # теперь редактится — числовой пароль выглядит так же. Это осознанный лишний

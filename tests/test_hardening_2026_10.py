@@ -225,15 +225,44 @@ for label in [
         "SECRET=/home/wJalrXUtnFEMIK7MDENGb",
         "SECRET=/run/supersecrettoken123456"]:
     check("H7 редактится (секрет): {}".format(label), redacted(label), label)
-# Контроль: легитимные код-референсы и пути по-прежнему НЕ редактятся.
+# === H8 (ревью 28.10.2026): строгий whitelist — shape-ветки убраны ===
+# Независимое ревью подтвердило: ветки «путь / URL / $-ссылка / код-референс /
+# env» пропускали настоящий секрет нужной формы (PASSWORD=/home/hunter2x,
+# =config.hunter2, =$Pa55w0rd, =https://x.com/hunter2). Структурно отличить такой
+# секрет от легитимного кода нельзя (та же низкая энтропия), поэтому по инварианту
+# TS.md §1.4 «сомнение → редактировать» (вариант A) shape-ветки удалены. Остались
+# только имена типов/литералы и явные плейсхолдеры. Цена — осознанная
+# over-redaction код-референсов и путей под секретным ключом (их читает агент);
+# на ВЫПОЛНЕНИЕ команд не влияет: redact() работает только над выводом.
+print("=== H8: строгий whitelist — shape-значения под секретным ключом редактятся ===")
 for label in [
-        "PASSWORD=self.password",
-        "API_KEY=config.database_url",
-        "API_KEY=config.DATABASE_URL",
-        "SECRET_FILE=/etc/ssl/private",
-        "PWD=/home/igaranov",
-        "API_KEY=request.headers"]:
-    check("H7 не редактится (код/путь): {}".format(label), not redacted(label), label)
+        "PASSWORD=/home/hunter2x", "PASSWORD=/var/s3cr3t", "PASSWORD=/data/correcthorse",
+        # URL ловится в КАВЫЧКАХ (secret-quoted-assignment, charset с `:`); голый
+        # `PASSWORD=https://…` не ловит ни одно правило — `:` вне charset
+        # env-assignment, это pre-existing-ограничение, идентичное main.
+        'PASSWORD="https://x.com/hunter2"', 'PASSWORD="ftp://hunter2"',
+        "PASSWORD=$Pa55w0rd",
+        "PASSWORD=os.environ.hunter2", "PASSWORD=env.hunter",
+        "PASSWORD=config.hunter2", "API_KEY=request.headers",
+        "API_KEY=config.database_url", "SECRET_FILE=/etc/ssl/private",
+        "PWD=/home/igaranov", "PASSWORD=self.password",
+        "PASSWORD=password", "PASSWORD=secret"]:
+    check("H8 редактится (строгий A): {}".format(label), redacted(label), label)
+# F5: подстрока REDACTED в значении больше не открывает проход — хвост редактится.
+check("H8 F5: REDACTED-подстрока не спасает",
+      redacted("PASSWORD=REDACTEDhunter2xx"), "PASSWORD=REDACTEDhunter2xx")
+# Контроль: имена типов/литералы и ЯВНЫЕ плейсхолдеры по-прежнему НЕ редактятся.
+for label in [
+        "token: string", "password = None", "secret: bool", "SECRET=true",
+        "SECRET=null", "API_KEY=placeholder", "API_KEY=your-api-key",
+        "SECRET_KEY=your-secret-key-here", "API_KEY=<your-token>", "TIMEOUT_SECRET=30"]:
+    check("H8 не редактится (тип/плейсхолдер): {}".format(label), not redacted(label), label)
+# Контроль: вето _looks_secret всё ещё закрывает высокоэнтропийный <...>.
+check("H8 _looks_secret вето на <blob>",
+      redacted("SECRET=<AKIAIOSFODNN7EXAMPLE>"), "SECRET=<blob>")
+# Контроль: наш собственный плейсхолдер не переобрабатывается.
+check("H8 чистый плейсхолдер не трогаем",
+      not redacted("PASSWORD=[REDACTED:ENV_SECRET]"), "placeholder-passthrough")
 
 print("=== H6: правки по подтверждающему ревью ===")
 # H6.1 — node -e require('fs') без delete-метода НЕ должен давать ask.

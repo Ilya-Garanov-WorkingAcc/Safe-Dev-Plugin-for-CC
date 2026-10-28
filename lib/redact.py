@@ -15,47 +15,47 @@ from lib import ruleset
 
 PLACEHOLDER = "[REDACTED:{}]"
 
+# Значение, которое ЦЕЛИКОМ состоит из наших плейсхолдеров, не переобрабатываем
+# (иначе получили бы вложенные [REDACTED:[REDACTED:…]]). Проверка точная: прежняя
+# `"REDACTED" in val` срабатывала по подстроке и открывала проход — настоящий
+# секрет, приклеенный к плейсхолдеру (`REDACTEDhunter2`, `[x]realsecret`),
+# пропускался целиком (ревью 28.10.2026, F5). Теперь хвост-секрет редактируется.
+_ONLY_PLACEHOLDER_RE = re.compile(r"^(?:\[REDACTED:[^\]]*\])+$")
+
 # Значения, которые не являются секретом, даже если ключ назван «...secret»:
 # типы, литералы, шаблоны-плейсхолдеры, схемы авторизации. Иначе `token:
 # string`, `Authorization: Bearer <token>`, `password = None` давали ложное
 # срабатывание и портили код, который читает модель (аудит 03.10.2026, C8).
 #
-# Границы ужесточены после ревью 27.10.2026: прежние ветки «путь/число/URL/
-# код» пропускали настоящие секреты (`PASSWORD=/a/b`, `SECRET=config.Abc123`,
-# числовые PIN, токен в query URL). Теперь каждая ветка описывает ровно ту
-# форму, которой настоящий ключ/токен/пароль не бывает; сомнение трактуется в
-# пользу редактирования (инвариант TS.md §1.4 — лучше лишняя маска, чем утечка).
-# Сегменты-идентификаторы проверяются с учётом регистра через (?-i:…), иначе
-# внешний re.I стёр бы различие «нормальный идентификатор / случайный токен».
+# Границы ужесточены после ревью 27.10.2026, затем РАДИКАЛЬНО сужены после
+# независимого ревью 28.10.2026 (вариант A). Прежние shape-ветки «путь / URL /
+# $-ссылка / код-референс / os.environ / env» пропускали НАСТОЯЩИЙ секрет нужной
+# формы: `PASSWORD=/home/hunter2x`, `=config.hunter2`, `=$Pa55w0rd`,
+# `=https://x.com/hunter2`. Структурно отличить такой низкоэнтропийный секрет от
+# легитимного кода/пути НЕЛЬЗЯ (те же слова, та же длина), а вето `_looks_secret`
+# ловит только высокую энтропию. Поэтому по инварианту TS.md §1.4 «сомнение →
+# редактировать» все shape-ветки удалены: whitelist пропускает ТОЛЬКО имена
+# типов/литералы и явные плейсхолдеры (`<...>`, `your-...-here`, `[redacted:...]`,
+# короткое число). Цена — осознанная over-redaction код-референсов и путей под
+# секретным ключом; это вывод, который читает агент, на выполнение команд не
+# влияет. Слабые литералы-значения token/secret/password убраны: это топ слабых
+# паролей, а не только имена типов.
 _KEYWORD_VALUE_RE = re.compile(
     r"^(?:string|str|int|integer|bool|boolean|true|false|null|none|nil|required|"
     r"optional|number|object|array|any|void|undefined|empty|bearer|basic|digest|"
-    r"token|secret|password|placeholder|example|"
+    r"placeholder|example|"
     r"redacted|x{3,}|"
     # Короткое число/константа (порт, таймаут, флаг). Длинные цифровые значения
     # НЕ в whitelist: числовой пароль/PIN выглядит так же.
     r"[+-]?\d{1,3}(?:\.\d{1,3})?|"
-    # Путь только под известным системным корнем и из безопасных символов.
-    # Одноимённый секрет (`/Zk3q9…`, `/p@ss!`) и относительные `./x`, `~x` сюда
-    # не попадают и редактятся.
-    r"/(?:home|usr|var|etc|opt|tmp|srv|bin|sbin|lib|lib64|mnt|media|dev|proc|"
-    r"sys|root|boot|run|Users|private|data)(?:/[\w.\- ]*)*|"
-    # URL без учётных данных и без query/fragment: в query/`#` прячут токен.
-    r"[a-z][a-z0-9+.\-]*://[^@\s?#]*|"
     # Плейсхолдер: `your` + ТОЛЬКО слова-заполнители (your-secret-key-here,
     # your-api-key). Настоящий ключ yourSuperSecretKey99 имеет случайный хвост,
     # не состоящий из этих слов, и редактируется.
     r"your(?:[-_]?(?:token|key|secret|password|api|credential|value|name|pass|"
-    r"placeholder|here|example|sample|dummy|changeme|goes|real))+|" +
-    # Ссылка на код: self.x, request.META, config.database_url. Каждый сегмент —
-    # нормальный идентификатор (всё строчное ИЛИ всё ПРОПИСНОЕ): случайный токен
-    # config.Abc123xyzQ и app.9fK2 (цифра сразу после точки) не проходят.
-    r"(?:self|cls|this|req|request|res|response|os|sys|io|process|config|"
-    r"settings|ctx|context|window|document|globals|locals|params|conf|app)"
-    r"(?:\.(?-i:[a-z_][a-z0-9_]*|[A-Z_][A-Z0-9_]*))+(?:\(\)|\[[^\]]*\])?|"
-    r"os\.environ[\w.()\[\]\"']*|process\.env[\w.()\[\]\"']*|"
-    r"<[^>]*>|\$\{?[\w.]+\}?|"
-    r"env\.(?-i:[a-z_][a-z0-9_]*|[A-Z_][A-Z0-9_]*)|\[redacted:[^\]]*\])$", re.I)
+    r"placeholder|here|example|sample|dummy|changeme|goes|real))+|"
+    # Явные плейсхолдеры `<...>` и наш собственный `[redacted:...]`. Высоко-
+    # энтропийное содержимое `<...>` добивает вето _looks_secret ниже.
+    r"<[^>]*>|\[redacted:[^\]]*\])$", re.I)
 
 
 _ALNUM_RUN_RE = re.compile(r"[A-Za-z0-9]+")
@@ -110,7 +110,7 @@ def redact(text):
             val = m.group(_grp)
             if val is None:
                 return m.group(0)
-            if "REDACTED" in val:        # значение уже вычищено ранее — пропускаем
+            if _ONLY_PLACEHOLDER_RE.match(val):   # уже наш плейсхолдер целиком
                 return m.group(0)
             if (_name == "ENV_SECRET" and _KEYWORD_VALUE_RE.match(val.strip())
                     and not _looks_secret(val)):
